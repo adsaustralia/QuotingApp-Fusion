@@ -27,3 +27,7 @@ streamlit run app.py
 
 ## Restore saved settings
 When you save a sheet to the bundle, the app stores the row/column settings and will restore them when you return to that sheet (if Auto-restore is enabled).
+
+
+## Quote History (v10)
+Sidebar Page switch: Quote Builder / History. Save quotes to /data/history as JSON. History supports win/lose edits, CSV export, and basic analytics.

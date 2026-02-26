@@ -2,18 +2,20 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import re, json, math, io
+import re, json, math, io, uuid
 from pathlib import Path
 from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v9-bundle-json-export-import"
+APP_VERSION = "row-based-v10-quote-history-winlose"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
 MAPPING_DIR = DATA_DIR / "mappings"
 MAPPING_DIR.mkdir(parents=True, exist_ok=True)
+HISTORY_DIR = DATA_DIR / "history"
+HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_STANDARD_STOCKS_CSV = DATA_DIR / "standard_stocks.csv"
 
 # Session bundle holds per-sheet calculated results to apply later
@@ -80,6 +82,35 @@ def deserialize_bundle(obj: dict) -> dict:
             df = pd.DataFrame()
         bundle[sh] = {"settings": settings, "lines": df}
     return bundle
+
+
+def _history_path(quote_id: str) -> Path:
+    return HISTORY_DIR / f"{quote_id}.json"
+
+def save_history_record(record: dict) -> None:
+    quote_id = record.get("quote_id") or str(uuid.uuid4())
+    record["quote_id"] = quote_id
+    _history_path(quote_id).write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
+
+def list_history_records() -> list[dict]:
+    records = []
+    for fp in sorted(HISTORY_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            records.append(json.loads(fp.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    return records
+
+def update_history_record(quote_id: str, updates: dict) -> None:
+    fp = _history_path(quote_id)
+    if not fp.exists():
+        return
+    try:
+        rec = json.loads(fp.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    rec.update(updates)
+    fp.write_text(json.dumps(rec, indent=2, default=str), encoding="utf-8")
 
 def parse_size_text(text: str):
     """
@@ -293,6 +324,8 @@ st.caption("Example: Size row 5, Material row 6, Sides row 10, Qty row 57. Each 
 
 with st.sidebar:
     st.header("Upload")
+    page = st.radio("Page", ["Quote Builder", "History"], index=0)
+
     customer = st.text_input("Customer", value="AU Holiday")
     uploaded = st.file_uploader("Customer Excel", type=["xlsx"])
 
@@ -343,6 +376,7 @@ if uploaded is None:
     st.stop()
 
 _uploaded_bytes = uploaded.getvalue()
+_uploaded_name = getattr(uploaded, "name", "uploaded.xlsx")
 
 # Standard stocks
 if std_upload is not None:
@@ -358,6 +392,103 @@ df_std["sqm_rate"] = pd.to_numeric(df_std["sqm_rate"], errors="coerce")
 std_options = df_std["stock_name_std"].dropna().tolist()
 std_rate_map = dict(zip(df_std["stock_name_std"], df_std["sqm_rate"]))
 
+
+# ---------- HISTORY PAGE ----------
+if page == "History":
+    st.title("Quote History — Win/Lose")
+    records = list_history_records()
+    if not records:
+        st.info("No history yet. Go to 'Quote Builder' and click 'Save Quote to History'.")
+        st.stop()
+
+    df = pd.DataFrame(records)
+
+    f1, f2, f3, f4 = st.columns([1.2, 1.2, 1.2, 2.4])
+    status_vals = sorted(df.get("status", pd.Series(["Pending"])).fillna("Pending").unique().tolist())
+    status_filter = f1.multiselect("Status", options=status_vals, default=status_vals)
+
+    cust_vals = sorted(df.get("customer", pd.Series(dtype=str)).fillna("").unique().tolist())
+    customer_filter = f2.multiselect("Customer", options=cust_vals, default=cust_vals[: min(10, len(cust_vals))])
+
+    date_contains = f3.text_input("Date contains", value="")
+    search = f4.text_input("Search (file / notes / sheet)", value="")
+
+    def _contains(s, needle):
+        try:
+            return needle.lower() in str(s).lower()
+        except Exception:
+            return False
+
+    fdf = df.copy()
+    if "status" in fdf.columns:
+        fdf = fdf[fdf["status"].fillna("Pending").isin(status_filter)]
+    if "customer" in fdf.columns and customer_filter:
+        fdf = fdf[fdf["customer"].fillna("").isin(customer_filter)]
+    if date_contains.strip():
+        fdf = fdf[fdf.get("created_at", "").apply(lambda x: _contains(x, date_contains.strip()))]
+    if search.strip():
+        needle = search.strip()
+        fdf = fdf[
+            fdf.get("file_name", "").apply(lambda x: _contains(x, needle))
+            | fdf.get("notes", "").apply(lambda x: _contains(x, needle))
+            | fdf.get("applied_sheets", "").astype(str).apply(lambda x: _contains(x, needle))
+        ]
+
+    display_cols = ["quote_id","created_at","customer","file_name","status","loss_reason","sell_price","subtotal_material","total_sqm","ds_loading_pct","price_row","applied_sheets","notes"]
+    display_cols = [c for c in display_cols if c in fdf.columns]
+    edit_df = fdf[display_cols].copy()
+
+    st.caption("Edit status/reason/notes then click 'Save changes'.")
+    edited = st.data_editor(
+        edit_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "status": st.column_config.SelectboxColumn("Status", options=["Pending","Won","Lost"]),
+            "loss_reason": st.column_config.SelectboxColumn("Loss reason", options=["","Price","Timing","Spec/Capability","Service","Other"]),
+        }
+    )
+
+    if st.button("Save changes", type="primary"):
+        for _, row in edited.iterrows():
+            qid = row.get("quote_id")
+            if not qid:
+                continue
+            updates = {
+                "status": row.get("status","Pending"),
+                "loss_reason": row.get("loss_reason",""),
+                "notes": row.get("notes",""),
+                "sell_price": row.get("sell_price", None),
+            }
+            update_history_record(str(qid), updates)
+        st.success("History updated.")
+        st.rerun()
+
+    st.download_button(
+        "Download History CSV",
+        data=fdf.to_csv(index=False).encode("utf-8"),
+        file_name=f"quote_history_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+    )
+
+    st.subheader("Analytics")
+    c1, c2, c3 = st.columns(3)
+    total = len(df)
+    won = int((df.get("status","") == "Won").sum()) if "status" in df.columns else 0
+    lost = int((df.get("status","") == "Lost").sum()) if "status" in df.columns else 0
+    c1.metric("Total quotes", total)
+    c2.metric("Won", won)
+    c3.metric("Win rate", f"{(won/total*100):.1f}%" if total else "0.0%")
+
+    if "loss_reason" in df.columns:
+        st.caption("Loss reasons (count)")
+        lr = df[df.get("status","") == "Lost"]["loss_reason"].fillna("").replace("", "Unspecified").value_counts()
+        if len(lr):
+            st.bar_chart(lr)
+
+    st.stop()
+
+# ---------- QUOTE BUILDER PAGE ----------
 # Sheet names
 uploaded.seek(0)
 wb_ro = openpyxl.load_workbook(uploaded, read_only=True, data_only=True)
