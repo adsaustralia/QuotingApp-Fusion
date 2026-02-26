@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v16-global-price-row-lock"
+APP_VERSION = "row-based-v17-per-sheet-price-row-and-select-sheets"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -515,7 +515,7 @@ if _do_restore:
     st.session_state["end_col_letter"] = str(_saved.get("end_col_letter", "Z"))
     st.session_state["units"] = str(_saved.get("units", "mm"))
     st.session_state["ds_loading_pct_pct"] = float(_saved.get("ds_loading_pct", 0.20)) * 100.0
-    st.session_state["global_price_row"] = int(_saved.get("price_row", int(_saved.get("qty_row",57))+1))
+    st.session_state["price_row"] = int(_saved.get("price_row", int(_saved.get("qty_row",57))+1))
     st.session_state["skip_zero_qty"] = bool(_saved.get("skip_zero_qty", True))
     st.session_state["_force_restore"] = False
 units = top2.selectbox("Units", ["mm","cm","m"], index=0, key="units")
@@ -551,19 +551,19 @@ skip_zero_qty    = r3.checkbox("Skip columns with Qty <= 0", value=True, key="sk
 
 st.subheader("Export output location")
 st.caption("By default, price is written **next to the Qty row** (Qty row + 1).")
-if "global_price_row" not in st.session_state:
-    # initialize once (do NOT change when switching sheets)
-    st.session_state["global_price_row"] = int(st.session_state.get("qty_row", int(qty_row))) + 1
-global_price_row = st.number_input("Write price into row (GLOBAL, 1-indexed)", 1, 5000, int(st.session_state["global_price_row"]), 1, key="global_price_row")
-# keep old variable name for minimal changes below
-price_row = int(global_price_row)
+price_row = st.number_input("Write price into row (1-indexed)", 1, 5000, int(qty_row)+1, 1, key="price_row")
 
 
 apply_mode = st.radio("Apply prices to", ["Bundle sheets (saved)", "Current sheet only", "ALL sheets (same settings)"], index=0, horizontal=True, key="apply_mode")
 all_sheets_selected = []
 if apply_mode == "ALL sheets (same settings)":
     all_sheets_selected = st.multiselect("Select sheets to update", options=sheet_names, default=sheet_names, key="all_sheets_selected")
-write_zero_when_missing_rate = st.checkbox("Write $0.00 when rate/mapping missing (otherwise leave blank)", value=False, key="write_zero_when_missing_rate")
+write_zero_when_missing_rate = st.checkbox
+
+bundle_export_selection = []
+if apply_mode == "Bundle sheets (saved)" and st.session_state.bundle:
+    bundle_export_selection = st.multiselect("Bundle sheets to export", options=list(st.session_state.bundle.keys()), default=list(st.session_state.bundle.keys()), key="bundle_export_selection")
+("Write $0.00 when rate/mapping missing (otherwise leave blank)", value=False, key="write_zero_when_missing_rate")
 
 # ---------- Extract row-based items ----------
 uploaded.seek(0)
@@ -685,7 +685,7 @@ with bcol1:
     "end_col_letter": str(end_col_letter).strip().upper(),
     "units": units,
     "ds_loading_pct": float(ds_loading_pct),
-    "price_row": int(st.session_state.get("global_price_row", price_row)),
+    "price_row": int(st.session_state.get("price_row", price_row)),
     "skip_zero_qty": bool(skip_zero_qty),
 }}
         st.success(f"Saved '{sheet_name}' to bundle.")
@@ -728,7 +728,7 @@ if auto_save_on_open and sheet_name not in st.session_state.bundle:
     "end_col_letter": str(end_col_letter).strip().upper(),
     "units": units,
     "ds_loading_pct": float(ds_loading_pct),
-    "price_row": int(st.session_state.get("global_price_row", price_row)),
+    "price_row": int(st.session_state.get("price_row", price_row)),
     "skip_zero_qty": bool(skip_zero_qty),
 }}
     st.info(f"Auto-saved '{sheet_name}' to bundle.")
@@ -760,6 +760,7 @@ def export_preserving_excel_all_sheets() -> bytes:
 
     apply_mode_local = st.session_state.get("apply_mode", "Bundle sheets (saved)")
     selected_local = st.session_state.get("all_sheets_selected", [])
+    bundle_selected_local = st.session_state.get("bundle_export_selection", [])
     write_zero_missing = bool(st.session_state.get("write_zero_when_missing_rate", False))
     diag_rows = []
 
@@ -779,6 +780,7 @@ def export_preserving_excel_all_sheets() -> bytes:
         out["units"] = s.get("units", units)
         out["ds_loading_pct"] = s.get("ds_loading_pct", ds_loading_pct)
         out["skip_zero_qty"] = s.get("skip_zero_qty", skip_zero_qty)
+        out["price_row"] = s.get("price_row", s.get("output_row", None))
         return out
 
     def compute_lines_for_sheet(sh: str, settings: dict) -> pd.DataFrame:
@@ -792,6 +794,11 @@ def export_preserving_excel_all_sheets() -> bytes:
         mat_r = int(ns.get("mat_row", mat_row))
         sides_r = int(ns.get("sides_row", sides_row))
         qty_r = int(ns.get("qty_row", qty_row))
+        price_row_sheet = ns.get("price_row", None)
+        try:
+            price_row_sheet = int(price_row_sheet) if price_row_sheet is not None else int(qty_r) + 1
+        except Exception:
+            price_row_sheet = int(qty_r) + 1
         start_col = str(ns.get("start_col_letter", start_col_letter)).strip().upper()
         end_col = str(ns.get("end_col_letter", end_col_letter)).strip().upper()
         units_local = str(ns.get("units", units))
@@ -856,11 +863,13 @@ def export_preserving_excel_all_sheets() -> bytes:
                 "qty_row": qty_r,
                 "units": units_local,
                 "ds_loading_pct": ds_local,
+            "price_row": int(price_row_sheet),
                 "total_sqm": 0.0,
                 "subtotal": 0.0,
             })
             return df
 
+        df["_price_row"] = int(price_row_sheet)
         df["sqm_each"] = df.apply(lambda r: sqm_calc(r["shape"], r["width_mm"], r["height_mm"], r["diameter_mm"]), axis=1)
         df["total_sqm"] = pd.to_numeric(df["sqm_each"], errors="coerce") * pd.to_numeric(df["qty"], errors="coerce")
 
@@ -889,6 +898,7 @@ def export_preserving_excel_all_sheets() -> bytes:
             "cols": f"{start_col}:{end_col}",
             "units": units_local,
             "ds_loading_pct": ds_local,
+            "price_row": int(price_row_sheet),
         })
         return df
 
@@ -897,7 +907,10 @@ def export_preserving_excel_all_sheets() -> bytes:
     applied_settings = {}  # sh -> settings
 
     if apply_mode_local == "Bundle sheets (saved)" and st.session_state.bundle:
-        for sh, data in st.session_state.bundle.items():
+        bundle_iter = st.session_state.bundle.items()
+        if bundle_selected_local:
+            bundle_iter = [(k, st.session_state.bundle[k]) for k in bundle_selected_local if k in st.session_state.bundle]
+        for sh, data in bundle_iter:
             settings = data.get("settings", {}) if isinstance(data, dict) else {}
             df_lines = compute_lines_for_sheet(sh, settings)
             to_apply[sh] = df_lines
@@ -936,7 +949,8 @@ def export_preserving_excel_all_sheets() -> bytes:
                     val = 0.0
                 else:
                     continue
-            cell = ws.cell(row=int(price_row), column=c)
+            row_to_write = int(r.get("_price_row", price_row))
+            cell = ws.cell(row=row_to_write, column=c)
             cell.value = float(val)
             cell.number_format = "$#,##0.00"
         applied_sheets.append(sh)
@@ -963,7 +977,7 @@ def export_preserving_excel_all_sheets() -> bytes:
         ("Customer", customer),
         ("Applied sheets", ", ".join(applied_sheets) if applied_sheets else "(none)"),
         ("Apply mode", apply_mode_local),
-        ("Price row", int(price_row)),
+        ("Price row", "Per-sheet (saved)"),
         ("DS loading %", f"{ds_loading_pct*100:.0f}%"),
         ("Total SQM", f"{total_sqm_all:,.3f}"),
         ("Subtotal (Material)", f"{subtotal_all:,.2f}"),
@@ -977,7 +991,7 @@ def export_preserving_excel_all_sheets() -> bytes:
     if diag_rows:
         start_r = len(sum_rows) + 3
         ws_sum.cell(row=start_r, column=1, value="Diagnostics")
-        headers = ["sheet","items","missing_rate_or_mapping","cols","size_row","mat_row","sides_row","qty_row","units","ds_loading_pct","total_sqm","subtotal"]
+        headers = ["sheet","items","missing_rate_or_mapping","cols","size_row","mat_row","sides_row","qty_row","price_row","units","ds_loading_pct","total_sqm","subtotal"]
         for c_i, h in enumerate(headers, start=1):
             ws_sum.cell(row=start_r+1, column=c_i, value=h)
         for rr, d in enumerate(diag_rows, start=start_r+2):
@@ -1028,7 +1042,7 @@ with st.expander("Save to History", expanded=True):
             "loss_reason": hist_loss_reason,
             "sell_price": hist_sell_price,
             "notes": hist_notes,
-            "price_row": int(st.session_state.get("global_price_row", price_row)),
+            "price_row": int(st.session_state.get("price_row", price_row)),
             "ds_loading_pct": float(ds_loading_pct),
             "applied_sheets": list(to_apply.keys()),
             "total_sqm": total_sqm_all,
