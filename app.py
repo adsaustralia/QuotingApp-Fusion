@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v17-per-sheet-price-row-and-select-sheets"
+APP_VERSION = "row-based-v18-syntax-fix-checkbox"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -563,7 +563,7 @@ write_zero_when_missing_rate = st.checkbox
 bundle_export_selection = []
 if apply_mode == "Bundle sheets (saved)" and st.session_state.bundle:
     bundle_export_selection = st.multiselect("Bundle sheets to export", options=list(st.session_state.bundle.keys()), default=list(st.session_state.bundle.keys()), key="bundle_export_selection")
-("Write $0.00 when rate/mapping missing (otherwise leave blank)", value=False, key="write_zero_when_missing_rate")
+write_zero_when_missing_rate = st.checkboxwrite_zero_when_missing_rate = st.checkbox("Write $0.00 when rate/mapping missing (otherwise leave blank)", value=False, key="write_zero_when_missing_rate")
 
 # ---------- Extract row-based items ----------
 uploaded.seek(0)
