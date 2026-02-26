@@ -31,3 +31,9 @@ When you save a sheet to the bundle, the app stores the row/column settings and 
 
 ## Quote History (v10)
 Sidebar Page switch: Quote Builder / History. Save quotes to /data/history as JSON. History supports win/lose edits, CSV export, and basic analytics.
+
+
+## v11 changes
+- DS loading uses a textbox (number input) default 20.
+- Export can apply prices to ALL sheets using the same settings.
+- Save to History is shown prominently above export.

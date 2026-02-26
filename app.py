@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v10-quote-history-winlose"
+APP_VERSION = "row-based-v11-history-visible-apply-all-sheets-ds-text"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -541,7 +541,7 @@ sides_row= c3.number_input("Sides row", 1, 5000, 10, 1, key="sides_row")
 qty_row  = c4.number_input("Qty row", 1, 5000, 57, 1, key="qty_row")
 default_sides = c5.radio("Default sides (if blank)", ["SS","DS"], index=0, horizontal=True, key="default_sides")
 
-ds_loading_pct = st.slider("DS loading (%)", 0.0, 100.0, 20.0, 1.0, key="ds_loading_pct_pct") / 100.0
+ds_loading_pct = st.number_input("DS loading (%)", min_value=0.0, max_value=100.0, value=20.0, step=1.0, key="ds_loading_pct_pct") / 100.0
 
 st.subheader("Pick COLUMN range")
 r1, r2, r3 = st.columns([1.2,1.2,1.6])
@@ -552,6 +552,11 @@ skip_zero_qty    = r3.checkbox("Skip columns with Qty <= 0", value=True, key="sk
 st.subheader("Export output location")
 st.caption("By default, price is written **next to the Qty row** (Qty row + 1).")
 price_row = st.number_input("Write price into row (1-indexed)", 1, 5000, int(qty_row)+1, 1, key="price_row")
+
+apply_mode = st.radio("Apply prices to", ["Bundle sheets (saved)", "Current sheet only", "ALL sheets (same settings)"], index=0, horizontal=True)
+all_sheets_selected = []
+if apply_mode == "ALL sheets (same settings)":
+    all_sheets_selected = st.multiselect("Select sheets to update", options=sheet_names, default=sheet_names)
 
 # ---------- Extract row-based items ----------
 uploaded.seek(0)
@@ -720,19 +725,108 @@ st.table(summary)
 
 def export_preserving_excel_all_sheets() -> bytes:
     """
-    Preserve original formatting: write prices into the SAME price_row across all saved sheets.
-    Applies bundle sheets; if bundle is empty, applies current sheet only.
+    Preserve original formatting.
+    - Bundle sheets (saved): use st.session_state.bundle
+    - Current sheet: use current computed lines
+    - ALL sheets (same settings): recompute for each selected sheet using current settings
+    Writes prices into the SAME price_row across sheets.
     """
     wb = openpyxl.load_workbook(io.BytesIO(_uploaded_bytes), read_only=False, data_only=False)
 
-    to_apply = st.session_state.bundle if st.session_state.bundle else {sheet_name: {"lines": lines.copy()}}
+    # Decide which sheets/lines to apply
+    to_apply = {}
+
+    if apply_mode == "Bundle sheets (saved)" and st.session_state.bundle:
+        to_apply = st.session_state.bundle
+    elif apply_mode == "Current sheet only":
+        to_apply = {sheet_name: {"lines": lines.copy(), "settings": {}}}
+    elif apply_mode == "ALL sheets (same settings)":
+        # Recompute per sheet using current settings
+        # reuse stock mapping + std rate map
+        mapping = load_mapping(customer)
+
+        def compute_lines_for_sheet(sh: str) -> pd.DataFrame:
+            if sh not in wb.sheetnames:
+                return pd.DataFrame()
+            ws_local = wb[sh]
+
+            # column range
+            def col_idx(letter: str) -> int:
+                letter = (letter or "").strip().upper()
+                return column_index_from_string(letter)
+
+            c_start = col_idx(start_col_letter)
+            c_end = col_idx(end_col_letter)
+            if c_start > c_end:
+                c_start, c_end = c_end, c_start
+
+            items = []
+            for c in range(c_start, c_end + 1):
+                size_val = ws_local.cell(row=int(size_row), column=c).value
+                mat_val  = ws_local.cell(row=int(mat_row), column=c).value
+                sides_val= ws_local.cell(row=int(sides_row), column=c).value
+                qty_val  = ws_local.cell(row=int(qty_row), column=c).value
+
+                qty = pd.to_numeric(eval_qty_value(qty_val, ws_local), errors="coerce")
+                if skip_zero_qty and (pd.isna(qty) or float(qty) <= 0):
+                    continue
+
+                size_text = "" if size_val is None else str(size_val)
+                geo = parse_size_text(size_text)
+                shape = geo["shape"] if geo["shape"] != "unknown" else "rectangle"
+
+                width_mm = geo["width_mm"] * u if pd.notna(geo["width_mm"]) else np.nan
+                height_mm = geo["height_mm"] * u if pd.notna(geo["height_mm"]) else np.nan
+                diameter_mm = geo["diameter_mm"] * u if pd.notna(geo["diameter_mm"]) else np.nan
+
+                sides = sides_normalize(sides_val, default=default_sides)
+
+                items.append({
+                    "origin_col": c,
+                    "col_letter": get_column_letter(c),
+                    "qty": float(qty) if pd.notna(qty) else 0.0,
+                    "sides": sides,
+                    "size_text": size_text,
+                    "shape": shape,
+                    "width_mm": width_mm,
+                    "height_mm": height_mm,
+                    "diameter_mm": diameter_mm,
+                    "stock_customer": "" if mat_val is None else str(mat_val),
+                })
+
+            df = pd.DataFrame(items)
+            if len(df) == 0:
+                return df
+
+            df["sqm_each"] = df.apply(lambda r: sqm_calc(r["shape"], r["width_mm"], r["height_mm"], r["diameter_mm"]), axis=1)
+            df["total_sqm"] = pd.to_numeric(df["sqm_each"], errors="coerce") * pd.to_numeric(df["qty"], errors="coerce")
+
+            df["stock_std"] = df["stock_customer"].apply(lambda x: mapping["mappings"].get(clean_text(x), ""))
+            df["sqm_rate"] = df["stock_std"].map(std_rate_map)
+            df["ds_factor"] = np.where(df["sides"].astype(str) == "DS", 1.0 + ds_loading_pct, 1.0)
+            df["line_total"] = (
+                pd.to_numeric(df["total_sqm"], errors="coerce")
+                * pd.to_numeric(df["sqm_rate"], errors="coerce")
+                * pd.to_numeric(df["ds_factor"], errors="coerce")
+            )
+            return df
+
+        selected = all_sheets_selected if all_sheets_selected else wb.sheetnames
+        for sh in selected:
+            df_lines = compute_lines_for_sheet(sh)
+            to_apply[sh] = {"lines": df_lines, "settings": {}}
+    else:
+        # fallback
+        to_apply = {sheet_name: {"lines": lines.copy(), "settings": {}}}
 
     applied_sheets = []
     for sh, data in to_apply.items():
         if sh not in wb.sheetnames:
             continue
         ws = wb[sh]
-        df_lines = data["lines"]
+        df_lines = data.get("lines", pd.DataFrame())
+        if df_lines is None or len(df_lines) == 0:
+            continue
         for _, r in df_lines.iterrows():
             c = int(r["origin_col"])
             val = r.get("line_total")
@@ -740,7 +834,6 @@ def export_preserving_excel_all_sheets() -> bytes:
                 continue
             cell = ws.cell(row=int(price_row), column=c)
             cell.value = float(val)
-            # keep formatting; only set number_format if blank
             if not cell.number_format:
                 cell.number_format = "0.00"
         applied_sheets.append(sh)
@@ -750,11 +843,15 @@ def export_preserving_excel_all_sheets() -> bytes:
         if name in wb.sheetnames:
             del wb[name]
 
+    # Build combined line items for summary/detail
     all_rows = []
     for sh, data in to_apply.items():
-        df_lines = data["lines"].copy()
-        df_lines["sheet"] = sh
-        all_rows.append(df_lines)
+        df_lines = data.get("lines", pd.DataFrame())
+        if df_lines is None or len(df_lines) == 0:
+            continue
+        df_lines2 = df_lines.copy()
+        df_lines2["sheet"] = sh
+        all_rows.append(df_lines2)
     all_df = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
 
     total_sqm_all = float(pd.to_numeric(all_df.get("total_sqm", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if len(all_df) else 0.0
@@ -764,6 +861,7 @@ def export_preserving_excel_all_sheets() -> bytes:
     sum_rows = [
         ("Customer", customer),
         ("Applied sheets", ", ".join(applied_sheets) if applied_sheets else "(none)"),
+        ("Apply mode", apply_mode),
         ("Price row", int(price_row)),
         ("DS loading %", f"{ds_loading_pct*100:.0f}%"),
         ("Total SQM", f"{total_sqm_all:,.3f}"),
@@ -788,6 +886,47 @@ def export_preserving_excel_all_sheets() -> bytes:
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
+
+
+st.subheader("Save Quote to History (visible)")
+with st.expander("Save to History", expanded=True):
+    hh1, hh2, hh3, hh4 = st.columns([1.3, 1.3, 1.3, 3.1])
+    hist_status = hh1.selectbox("Status", ["Pending","Won","Lost"], index=0, key="hist_status")
+    hist_loss_reason = hh2.selectbox("Loss reason", ["", "Price", "Timing", "Spec/Capability", "Service", "Other"], index=0, key="hist_loss_reason")
+    hist_sell_price = hh3.text_input("Sell price (optional)", value="", key="hist_sell_price")
+    hist_notes = hh4.text_input("Notes", value="", key="hist_notes")
+
+    if st.button("Save CURRENT quote/bundle to History", type="primary", key="hist_save_btn_top"):
+        to_apply = st.session_state.bundle if st.session_state.bundle else {sheet_name: {"lines": lines.copy(), "settings": {}}}
+        # compute totals from bundle
+        all_rows = []
+        for sh, data in to_apply.items():
+            df_lines = data["lines"].copy()
+            df_lines["sheet"] = sh
+            all_rows.append(df_lines)
+        all_df = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
+        total_sqm_all = float(pd.to_numeric(all_df.get("total_sqm", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if len(all_df) else 0.0
+        subtotal_all = float(pd.to_numeric(all_df.get("line_total", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if len(all_df) else 0.0
+
+        record = {
+            "quote_id": str(uuid.uuid4()),
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "customer": customer,
+            "file_name": _uploaded_name,
+            "status": hist_status,
+            "loss_reason": hist_loss_reason,
+            "sell_price": hist_sell_price,
+            "notes": hist_notes,
+            "price_row": int(price_row),
+            "ds_loading_pct": float(ds_loading_pct),
+            "applied_sheets": list(to_apply.keys()),
+            "total_sqm": total_sqm_all,
+            "subtotal_material": subtotal_all,
+            "bundle_settings": {sh: data.get("settings", {}) for sh, data in to_apply.items()},
+            "bundle_json": serialize_bundle(to_apply),
+        }
+        save_history_record(record)
+        st.success("Saved to history.")
 
 b1, b2 = st.columns(2)
 with b1:
