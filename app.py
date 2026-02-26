@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v13-bundle-recalc-per-sheet-settings"
+APP_VERSION = "row-based-v15-bundle-settings-fix-synonyms-and-log-used-settings"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -557,6 +557,7 @@ apply_mode = st.radio("Apply prices to", ["Bundle sheets (saved)", "Current shee
 all_sheets_selected = []
 if apply_mode == "ALL sheets (same settings)":
     all_sheets_selected = st.multiselect("Select sheets to update", options=sheet_names, default=sheet_names, key="all_sheets_selected")
+write_zero_when_missing_rate = st.checkbox("Write $0.00 when rate/mapping missing (otherwise leave blank)", value=False, key="write_zero_when_missing_rate")
 
 # ---------- Extract row-based items ----------
 uploaded.seek(0)
@@ -694,6 +695,23 @@ with bcol2:
 with bcol3:
     st.write("Sheets in bundle:", ", ".join(st.session_state.bundle.keys()) if st.session_state.bundle else "(none)")
 
+st.caption("Bundle settings summary")
+if st.session_state.bundle:
+    rows = []
+    for sh, data in st.session_state.bundle.items():
+        s = (data or {}).get("settings", {}) if isinstance(data, dict) else {}
+        rows.append({
+            "sheet": sh,
+            "size_row": s.get("size_row"),
+            "mat_row": s.get("mat_row"),
+            "sides_row": s.get("sides_row"),
+            "qty_row": s.get("qty_row"),
+            "cols": f"{s.get('start_col_letter','') or ''}:{s.get('end_col_letter','') or ''}",
+            "units": s.get("units"),
+            "ds_loading_%": round(float(s.get("ds_loading_pct", 0.0))*100.0, 2) if s.get("ds_loading_pct") is not None else None,
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
 if auto_save_on_open and sheet_name not in st.session_state.bundle:
     st.session_state.bundle[sheet_name] = {"lines": lines.copy(), "settings": {
     "size_row": int(size_row),
@@ -736,26 +754,43 @@ def export_preserving_excel_all_sheets() -> bytes:
 
     apply_mode_local = st.session_state.get("apply_mode", "Bundle sheets (saved)")
     selected_local = st.session_state.get("all_sheets_selected", [])
+    write_zero_missing = bool(st.session_state.get("write_zero_when_missing_rate", False))
+    diag_rows = []
 
     # Load mappings once
     mapping = load_mapping(customer)
+
+    def normalize_settings(s: dict) -> dict:
+        s = s or {}
+        # accept synonyms from older bundles/templates
+        out = {}
+        out["size_row"] = s.get("size_row", s.get("size_r", s.get("row_size", size_row)))
+        out["mat_row"] = s.get("mat_row", s.get("material_row", s.get("stock_row", mat_row)))
+        out["sides_row"] = s.get("sides_row", s.get("side_row", sides_row))
+        out["qty_row"] = s.get("qty_row", s.get("quantity_row", qty_row))
+        out["start_col_letter"] = s.get("start_col_letter", s.get("start_col", s.get("col_start", start_col_letter)))
+        out["end_col_letter"] = s.get("end_col_letter", s.get("end_col", s.get("col_end", end_col_letter)))
+        out["units"] = s.get("units", units)
+        out["ds_loading_pct"] = s.get("ds_loading_pct", ds_loading_pct)
+        out["skip_zero_qty"] = s.get("skip_zero_qty", skip_zero_qty)
+        return out
 
     def compute_lines_for_sheet(sh: str, settings: dict) -> pd.DataFrame:
         if sh not in wb.sheetnames:
             return pd.DataFrame()
         ws_local = wb[sh]
 
-        # settings with fallbacks
-        size_r = int(settings.get("size_row", size_row))
-        mat_r = int(settings.get("mat_row", mat_row))
-        sides_r = int(settings.get("sides_row", sides_row))
-        qty_r = int(settings.get("qty_row", qty_row))
-        start_col = str(settings.get("start_col_letter", start_col_letter)).strip().upper()
-        end_col = str(settings.get("end_col_letter", end_col_letter)).strip().upper()
-        units_local = str(settings.get("units", units))
-        # ds_loading_pct stored as decimal (0.2)
-        ds_local = float(settings.get("ds_loading_pct", ds_loading_pct))
-        skip_zero_local = bool(settings.get("skip_zero_qty", skip_zero_qty))
+        # settings (normalized)
+        ns = normalize_settings(settings)
+        size_r = int(ns.get("size_row", size_row))
+        mat_r = int(ns.get("mat_row", mat_row))
+        sides_r = int(ns.get("sides_row", sides_row))
+        qty_r = int(ns.get("qty_row", qty_row))
+        start_col = str(ns.get("start_col_letter", start_col_letter)).strip().upper()
+        end_col = str(ns.get("end_col_letter", end_col_letter)).strip().upper()
+        units_local = str(ns.get("units", units))
+        ds_local = float(ns.get("ds_loading_pct", ds_loading_pct))
+        skip_zero_local = bool(ns.get("skip_zero_qty", skip_zero_qty))
 
         u_local = {"mm":1.0,"cm":10.0,"m":1000.0}.get(units_local, 1.0)
 
@@ -804,6 +839,20 @@ def export_preserving_excel_all_sheets() -> bytes:
 
         df = pd.DataFrame(items)
         if len(df) == 0:
+            diag_rows.append({
+                "sheet": sh,
+                "items": 0,
+                "missing_rate_or_mapping": 0,
+                "cols": f"{start_col}:{end_col}",
+                "size_row": size_r,
+                "mat_row": mat_r,
+                "sides_row": sides_r,
+                "qty_row": qty_r,
+                "units": units_local,
+                "ds_loading_pct": ds_local,
+                "total_sqm": 0.0,
+                "subtotal": 0.0,
+            })
             return df
 
         df["sqm_each"] = df.apply(lambda r: sqm_calc(r["shape"], r["width_mm"], r["height_mm"], r["diameter_mm"]), axis=1)
@@ -811,12 +860,30 @@ def export_preserving_excel_all_sheets() -> bytes:
 
         df["stock_std"] = df["stock_customer"].apply(lambda x: mapping["mappings"].get(clean_text(x), ""))
         df["sqm_rate"] = df["stock_std"].map(std_rate_map)
+        missing_map = (df["stock_std"].fillna("") == "") | (df["sqm_rate"].isna())
+        missing_count = int(missing_map.sum())
+        if write_zero_missing and missing_count > 0:
+            df.loc[missing_map, "sqm_rate"] = 0.0
         df["ds_factor"] = np.where(df["sides"].astype(str) == "DS", 1.0 + ds_local, 1.0)
         df["line_total"] = (
             pd.to_numeric(df["total_sqm"], errors="coerce")
             * pd.to_numeric(df["sqm_rate"], errors="coerce")
             * pd.to_numeric(df["ds_factor"], errors="coerce")
         )
+        diag_rows.append({
+            "sheet": sh,
+            "items": int(len(df)),
+            "missing_rate_or_mapping": int(((df["stock_std"].fillna("") == "") | (df["sqm_rate"].isna())).sum()) if "sqm_rate" in df.columns else 0,
+            "total_sqm": float(pd.to_numeric(df.get("total_sqm", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()),
+            "subtotal": float(pd.to_numeric(df.get("line_total", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()),
+            "size_row": size_r,
+            "mat_row": mat_r,
+            "sides_row": sides_r,
+            "qty_row": qty_r,
+            "cols": f"{start_col}:{end_col}",
+            "units": units_local,
+            "ds_loading_pct": ds_local,
+        })
         return df
 
     # Decide which sheets to apply
@@ -859,7 +926,10 @@ def export_preserving_excel_all_sheets() -> bytes:
             c = int(r["origin_col"])
             val = r.get("line_total")
             if pd.isna(val):
-                continue
+                if write_zero_missing:
+                    val = 0.0
+                else:
+                    continue
             cell = ws.cell(row=int(price_row), column=c)
             cell.value = float(val)
             cell.number_format = "$#,##0.00"
@@ -897,6 +967,16 @@ def export_preserving_excel_all_sheets() -> bytes:
     for r_i, (k, v) in enumerate(sum_rows, start=1):
         ws_sum.cell(row=r_i, column=1, value=k)
         ws_sum.cell(row=r_i, column=2, value=v)
+
+    if diag_rows:
+        start_r = len(sum_rows) + 3
+        ws_sum.cell(row=start_r, column=1, value="Diagnostics")
+        headers = ["sheet","items","missing_rate_or_mapping","cols","size_row","mat_row","sides_row","qty_row","units","ds_loading_pct","total_sqm","subtotal"]
+        for c_i, h in enumerate(headers, start=1):
+            ws_sum.cell(row=start_r+1, column=c_i, value=h)
+        for rr, d in enumerate(diag_rows, start=start_r+2):
+            for c_i, h in enumerate(headers, start=1):
+                ws_sum.cell(row=rr, column=c_i, value=d.get(h))
 
     ws_li = wb.create_sheet("Line Items")
     if len(all_df):
