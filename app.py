@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v2-ds-loading-price-next-row"
+APP_VERSION = "row-based-v4-size-parser-w800-h1700"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -36,11 +36,24 @@ def save_mapping(customer: str, mapping: dict) -> None:
     fp.write_text(json.dumps(mapping, indent=2), encoding="utf-8")
 
 def parse_size_text(text: str):
+    """
+    Supports:
+      - "1200 x 900"
+      - "H1700 x W800mm" (letter adjacent)
+      - "1125W X 508 Hmm (2pcs)" (suffix)
+      - "585mm x W662.5mm"
+      - "DIA 600", "diameter 600", "450 round"
+    """
     t = clean_text(text)
     if not t:
         return {"shape":"unknown","width_mm":np.nan,"height_mm":np.nan,"diameter_mm":np.nan}
 
-    # circle: dia 600 / diameter 600 / 450 round
+    # remove bracket notes like (2pcs)
+    t = re.sub(r"\([^)]*\)", " ", t)
+    t = t.replace("mm", " ")
+    t = re.sub(r"\s+", " ", t).strip()
+
+    # circle
     m = re.search(r"(dia(?:meter)?)\s*[:=]?\s*(\d+(?:\.\d+)?)", t)
     if m:
         d = float(m.group(2))
@@ -50,12 +63,55 @@ def parse_size_text(text: str):
         d = float(m.group(1))
         return {"shape":"circle","width_mm":np.nan,"height_mm":np.nan,"diameter_mm":d}
 
-    # rectangle: 1200 x 900
+    # labelled width/height (any order), including adjacent patterns: w800, 800w, h1700, 1700h
+    w = None
+    h = None
+
+    # width patterns
+    mw = re.search(r"(?:\bwidth\b\s*[:=]?\s*(\d+(?:\.\d+)?))", t)
+    if mw:
+        w = float(mw.group(1))
+    if w is None:
+        mw = re.search(r"w\s*(\d+(?:\.\d+)?)", t)  # w800 or w 800
+        if mw:
+            w = float(mw.group(1))
+    if w is None:
+        mw = re.search(r"(\d+(?:\.\d+)?)\s*w", t)  # 800w
+        if mw:
+            w = float(mw.group(1))
+
+    # height patterns
+    mh = re.search(r"(?:\bheight\b\s*[:=]?\s*(\d+(?:\.\d+)?))", t)
+    if mh:
+        h = float(mh.group(1))
+    if h is None:
+        mh = re.search(r"h\s*(\d+(?:\.\d+)?)", t)  # h1700 or h 1700
+        if mh:
+            h = float(mh.group(1))
+    if h is None:
+        mh = re.search(r"(\d+(?:\.\d+)?)\s*h", t)  # 1700h
+        if mh:
+            h = float(mh.group(1))
+
+    if w is not None and h is not None:
+        return {"shape":"rectangle","width_mm":w,"height_mm":h,"diameter_mm":np.nan}
+
+    # generic rectangle: "1200 x 900"
     m = re.search(r"(\d+(?:\.\d+)?)\s*(x|\*|by)\s*(\d+(?:\.\d+)?)", t)
     if m:
-        w = float(m.group(1))
-        h = float(m.group(3))
-        return {"shape":"rectangle","width_mm":w,"height_mm":h,"diameter_mm":np.nan}
+        a = float(m.group(1))
+        b = float(m.group(3))
+        # if we found one of w/h, use it to decide which is missing
+        if w is not None and h is None:
+            return {"shape":"rectangle","width_mm":w,"height_mm":b,"diameter_mm":np.nan}
+        if h is not None and w is None:
+            return {"shape":"rectangle","width_mm":a,"height_mm":h,"diameter_mm":np.nan}
+        return {"shape":"rectangle","width_mm":a,"height_mm":b,"diameter_mm":np.nan}
+
+    # fallback: first two numbers
+    nums = re.findall(r"\d+(?:\.\d+)?", t)
+    if len(nums) >= 2:
+        return {"shape":"rectangle","width_mm":float(nums[0]),"height_mm":float(nums[1]),"diameter_mm":np.nan}
 
     return {"shape":"unknown","width_mm":np.nan,"height_mm":np.nan,"diameter_mm":np.nan}
 
@@ -277,7 +333,7 @@ lines["sqm_each"] = lines.apply(lambda r: sqm_calc(r["shape"], r["width_mm"], r[
 lines["total_sqm"] = pd.to_numeric(lines["sqm_each"], errors="coerce") * pd.to_numeric(lines["qty"], errors="coerce")
 
 if pd.to_numeric(lines["sqm_each"], errors="coerce").notna().sum() == 0:
-    st.error("Size parsing failed: SQM is blank for all columns. Check Size row values (expected 'W x H' or 'DIA 600' / '450 round').")
+    st.error("Size parsing failed: SQM is blank for all columns. Check the Size row values and Units. Supported: W x H, H/W labels (H1700 x W800), DIA 600, 450 round.")
 
 # ---------- Mapping ----------
 st.subheader("Stock Mapping (Customer name → Standard stock with sqm rate)")
