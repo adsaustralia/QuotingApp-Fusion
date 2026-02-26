@@ -23,3 +23,7 @@ Export preserves original formatting by editing the original workbook and writin
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+
+## Restore saved settings
+When you save a sheet to the bundle, the app stores the row/column settings and will restore them when you return to that sheet (if Auto-restore is enabled).

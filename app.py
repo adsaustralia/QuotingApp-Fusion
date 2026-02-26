@@ -8,13 +8,19 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v5-eval-sum-formulas-and-export-safe"
+APP_VERSION = "row-based-v7-restore-saved-settings"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
 MAPPING_DIR = DATA_DIR / "mappings"
 MAPPING_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_STANDARD_STOCKS_CSV = DATA_DIR / "standard_stocks.csv"
+
+# Session bundle holds per-sheet calculated results to apply later
+if "bundle" not in st.session_state:
+    st.session_state.bundle = {}  # {sheet_name: {"lines": df}}
+if "_force_restore" not in st.session_state:
+    st.session_state._force_restore = False
 
 # ---------- helpers ----------
 def clean_text(s) -> str:
@@ -251,6 +257,12 @@ with st.sidebar:
     uploaded = st.file_uploader("Customer Excel", type=["xlsx"])
 
     st.divider()
+    st.header("Bundle")
+    if st.button("Clear bundle"):
+        st.session_state.bundle = {}
+        st.success("Bundle cleared.")
+
+    st.divider()
     st.header("Standard stock rates")
     st.caption("CSV columns required: stock_name_std, sqm_rate")
     std_upload = st.file_uploader("Optional: upload standard_stocks.csv", type=["csv"])
@@ -258,6 +270,8 @@ with st.sidebar:
 if uploaded is None:
     st.info("Upload an Excel file to start.")
     st.stop()
+
+_uploaded_bytes = uploaded.getvalue()
 
 # Standard stocks
 if std_upload is not None:
@@ -281,7 +295,24 @@ wb_ro.close()
 
 top1, top2 = st.columns([2,1])
 sheet_name = top1.selectbox("Sheet", sheet_names, index=0)
-units = top2.selectbox("Units", ["mm","cm","m"], index=0)
+units = top2.selectbox("Units", ["mm","cm","m"], index=0, key="units")
+auto_save_on_open = st.checkbox("Auto-save this sheet to bundle when opened", value=False)
+
+# Restore saved settings for this sheet (if available)
+_saved = st.session_state.bundle.get(sheet_name, {}).get("settings")
+_do_restore = bool(_saved) and (st.session_state.get("auto_restore", True) or st.session_state.get("_force_restore", False))
+if _do_restore:
+    st.session_state["size_row"] = int(_saved.get("size_row", 5))
+    st.session_state["mat_row"] = int(_saved.get("mat_row", 6))
+    st.session_state["sides_row"] = int(_saved.get("sides_row", 10))
+    st.session_state["qty_row"] = int(_saved.get("qty_row", 57))
+    st.session_state["start_col_letter"] = str(_saved.get("start_col_letter", "A"))
+    st.session_state["end_col_letter"] = str(_saved.get("end_col_letter", "Z"))
+    st.session_state["units"] = str(_saved.get("units", "mm"))
+    st.session_state["ds_loading_pct_pct"] = float(_saved.get("ds_loading_pct", 0.20)) * 100.0
+    st.session_state["price_row"] = int(_saved.get("price_row", int(_saved.get("qty_row",57))+1))
+    st.session_state["skip_zero_qty"] = bool(_saved.get("skip_zero_qty", True))
+    st.session_state["_force_restore"] = False
 u = {"mm":1.0,"cm":10.0,"m":1000.0}[units]
 
 # Preview (best-effort)
@@ -296,23 +327,23 @@ with st.expander("Preview (all rows) — best effort", expanded=False):
 st.subheader("Pick ROW numbers (1-indexed)")
 
 c1, c2, c3, c4, c5 = st.columns([1.1,1.1,1.1,1.1,1.6])
-size_row = c1.number_input("Size row", 1, 5000, 5, 1)
-mat_row  = c2.number_input("Material row", 1, 5000, 6, 1)
-sides_row= c3.number_input("Sides row", 1, 5000, 10, 1)
-qty_row  = c4.number_input("Qty row", 1, 5000, 57, 1)
-default_sides = c5.radio("Default sides (if blank)", ["SS","DS"], index=0, horizontal=True)
+size_row = c1.number_input("Size row", 1, 5000, 5, 1, key="size_row")
+mat_row  = c2.number_input("Material row", 1, 5000, 6, 1, key="mat_row")
+sides_row= c3.number_input("Sides row", 1, 5000, 10, 1, key="sides_row")
+qty_row  = c4.number_input("Qty row", 1, 5000, 57, 1, key="qty_row")
+default_sides = c5.radio("Default sides (if blank)", ["SS","DS"], index=0, horizontal=True, key="default_sides")
 
-ds_loading_pct = st.slider("DS loading (%)", 0.0, 100.0, 20.0, 1.0) / 100.0
+ds_loading_pct = st.slider("DS loading (%)", 0.0, 100.0, 20.0, 1.0, key="ds_loading_pct_pct") / 100.0
 
 st.subheader("Pick COLUMN range")
 r1, r2, r3 = st.columns([1.2,1.2,1.6])
-start_col_letter = r1.text_input("Start column letter", value="A")
-end_col_letter   = r2.text_input("End column letter", value="Z")
-skip_zero_qty    = r3.checkbox("Skip columns with Qty <= 0", value=True)
+start_col_letter = r1.text_input("Start column letter", value="A", key="start_col_letter")
+end_col_letter   = r2.text_input("End column letter", value="Z", key="end_col_letter")
+skip_zero_qty    = r3.checkbox("Skip columns with Qty <= 0", value=True, key="skip_zero_qty")
 
 st.subheader("Export output location")
 st.caption("By default, price is written **next to the Qty row** (Qty row + 1).")
-price_row = st.number_input("Write price into row (1-indexed)", 1, 5000, int(qty_row)+1, 1)
+price_row = st.number_input("Write price into row (1-indexed)", 1, 5000, int(qty_row)+1, 1, key="price_row")
 
 # ---------- Extract row-based items ----------
 uploaded.seek(0)
@@ -420,6 +451,49 @@ st.subheader("Quote Review")
 review = lines[["col_letter","qty","sides","ds_factor","shape","size_text","stock_customer","stock_std","sqm_each","total_sqm","sqm_rate","line_total"]].copy()
 st.dataframe(review, use_container_width=True)
 
+# ----- Bundle controls -----
+st.subheader("Bundle (multi-sheet)")
+bcol1, bcol2, bcol3 = st.columns([1.6, 1.6, 3.0])
+with bcol1:
+    if st.button("Save this sheet to bundle", type="primary"):
+        st.session_state.bundle[sheet_name] = {"lines": lines.copy(), "settings": {
+    "size_row": int(size_row),
+    "mat_row": int(mat_row),
+    "sides_row": int(sides_row),
+    "qty_row": int(qty_row),
+    "start_col_letter": str(start_col_letter).strip().upper(),
+    "end_col_letter": str(end_col_letter).strip().upper(),
+    "units": units,
+    "ds_loading_pct": float(ds_loading_pct),
+    "price_row": int(price_row),
+    "skip_zero_qty": bool(skip_zero_qty),
+}}
+        st.success(f"Saved '{sheet_name}' to bundle.")
+with bcol2:
+    if st.button("Remove this sheet from bundle"):
+        if sheet_name in st.session_state.bundle:
+            del st.session_state.bundle[sheet_name]
+            st.success(f"Removed '{sheet_name}' from bundle.")
+        else:
+            st.info("This sheet is not in the bundle.")
+with bcol3:
+    st.write("Sheets in bundle:", ", ".join(st.session_state.bundle.keys()) if st.session_state.bundle else "(none)")
+
+if auto_save_on_open and sheet_name not in st.session_state.bundle:
+    st.session_state.bundle[sheet_name] = {"lines": lines.copy(), "settings": {
+    "size_row": int(size_row),
+    "mat_row": int(mat_row),
+    "sides_row": int(sides_row),
+    "qty_row": int(qty_row),
+    "start_col_letter": str(start_col_letter).strip().upper(),
+    "end_col_letter": str(end_col_letter).strip().upper(),
+    "units": units,
+    "ds_loading_pct": float(ds_loading_pct),
+    "price_row": int(price_row),
+    "skip_zero_qty": bool(skip_zero_qty),
+}}
+    st.info(f"Auto-saved '{sheet_name}' to bundle.")
+
 total_sqm = float(pd.to_numeric(review["total_sqm"], errors="coerce").fillna(0).sum())
 subtotal = float(pd.to_numeric(review["line_total"], errors="coerce").fillna(0).sum())
 
@@ -434,32 +508,72 @@ summary = pd.DataFrame([
 st.markdown("**Totals**")
 st.table(summary)
 
-def export_preserving_excel() -> bytes:
-    # write prices across columns into the chosen row (next to qty by default)
-    for _, r in lines.iterrows():
-        c = int(r["origin_col"])
-        val = r.get("line_total")
-        if pd.isna(val):
-            continue
-        cell = ws.cell(row=int(price_row), column=c)
-        cell.value = float(val)
-        cell.number_format = "0.00"
+def export_preserving_excel_all_sheets() -> bytes:
+    """
+    Preserve original formatting: write prices into the SAME price_row across all saved sheets.
+    Applies bundle sheets; if bundle is empty, applies current sheet only.
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(_uploaded_bytes), read_only=False, data_only=False)
 
-    # add summary/detail sheets
+    to_apply = st.session_state.bundle if st.session_state.bundle else {sheet_name: {"lines": lines.copy()}}
+
+    applied_sheets = []
+    for sh, data in to_apply.items():
+        if sh not in wb.sheetnames:
+            continue
+        ws = wb[sh]
+        df_lines = data["lines"]
+        for _, r in df_lines.iterrows():
+            c = int(r["origin_col"])
+            val = r.get("line_total")
+            if pd.isna(val):
+                continue
+            cell = ws.cell(row=int(price_row), column=c)
+            cell.value = float(val)
+            # keep formatting; only set number_format if blank
+            if not cell.number_format:
+                cell.number_format = "0.00"
+        applied_sheets.append(sh)
+
+    # Refresh summary sheets
     for name in ["Quote Summary", "Line Items"]:
         if name in wb.sheetnames:
             del wb[name]
+
+    all_rows = []
+    for sh, data in to_apply.items():
+        df_lines = data["lines"].copy()
+        df_lines["sheet"] = sh
+        all_rows.append(df_lines)
+    all_df = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
+
+    total_sqm_all = float(pd.to_numeric(all_df.get("total_sqm", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if len(all_df) else 0.0
+    subtotal_all = float(pd.to_numeric(all_df.get("line_total", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if len(all_df) else 0.0
+
     ws_sum = wb.create_sheet("Quote Summary")
-    for r_idx, row in enumerate(summary.itertuples(index=False), start=1):
-        ws_sum.cell(row=r_idx, column=1, value=row.Label)
-        ws_sum.cell(row=r_idx, column=2, value=row.Value)
+    sum_rows = [
+        ("Customer", customer),
+        ("Applied sheets", ", ".join(applied_sheets) if applied_sheets else "(none)"),
+        ("Price row", int(price_row)),
+        ("DS loading %", f"{ds_loading_pct*100:.0f}%"),
+        ("Total SQM", f"{total_sqm_all:,.3f}"),
+        ("Subtotal (Material)", f"{subtotal_all:,.2f}"),
+        ("Generated", datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ("App version", APP_VERSION),
+    ]
+    for r_i, (k, v) in enumerate(sum_rows, start=1):
+        ws_sum.cell(row=r_i, column=1, value=k)
+        ws_sum.cell(row=r_i, column=2, value=v)
 
     ws_li = wb.create_sheet("Line Items")
-    for c_idx, col in enumerate(review.columns.tolist(), start=1):
-        ws_li.cell(row=1, column=c_idx, value=col)
-    for r_idx, row in enumerate(review.itertuples(index=False), start=2):
-        for c_idx, v in enumerate(row, start=1):
-            ws_li.cell(row=r_idx, column=c_idx, value=v)
+    if len(all_df):
+        cols = ["sheet","col_letter","qty","sides","ds_factor","shape","size_text","stock_customer","stock_std","sqm_each","total_sqm","sqm_rate","line_total"]
+        cols = [c for c in cols if c in all_df.columns]
+        for c_i, col in enumerate(cols, start=1):
+            ws_li.cell(row=1, column=c_i, value=col)
+        for r_i, row in enumerate(all_df[cols].itertuples(index=False), start=2):
+            for c_i, v in enumerate(row, start=1):
+                ws_li.cell(row=r_i, column=c_i, value=v)
 
     out = io.BytesIO()
     wb.save(out)
@@ -467,9 +581,9 @@ def export_preserving_excel() -> bytes:
 
 b1, b2 = st.columns(2)
 with b1:
-    xbytes = export_preserving_excel()
+    xbytes = export_preserving_excel_all_sheets()
     st.download_button(
-        "Download Excel (preserve format)",
+        "Download Excel (ALL saved sheets)",
         data=xbytes,
         file_name=f"Quote_{customer}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
