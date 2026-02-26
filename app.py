@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v12-apply-all-sheets-fix-currency-format"
+APP_VERSION = "row-based-v13-bundle-recalc-per-sheet-settings"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -553,7 +553,7 @@ st.subheader("Export output location")
 st.caption("By default, price is written **next to the Qty row** (Qty row + 1).")
 price_row = st.number_input("Write price into row (1-indexed)", 1, 5000, int(qty_row)+1, 1, key="price_row")
 
-apply_mode = st.radio("Apply prices to", ["Bundle sheets (saved)", "Current sheet only", "ALL sheets (same settings)"], index=2, horizontal=True, key="apply_mode")
+apply_mode = st.radio("Apply prices to", ["Bundle sheets (saved)", "Current sheet only", "ALL sheets (same settings)"], index=0, horizontal=True, key="apply_mode")
 all_sheets_selected = []
 if apply_mode == "ALL sheets (same settings)":
     all_sheets_selected = st.multiselect("Select sheets to update", options=sheet_names, default=sheet_names, key="all_sheets_selected")
@@ -725,111 +725,136 @@ st.table(summary)
 
 def export_preserving_excel_all_sheets() -> bytes:
     """
-    Preserve original formatting.
-    - Bundle sheets (saved): use st.session_state.bundle
-    - Current sheet: use current computed lines
-    - ALL sheets (same settings): recompute for each selected sheet using current settings
-    Writes prices into the SAME price_row across sheets.
+    Preserve original formatting. Always write prices into the SAME global price_row.
+
+    Modes:
+    - Bundle sheets (saved): RE-CALCULATE each saved sheet using its saved settings (so each sheet can have different rows/cols/units).
+    - Current sheet only: use current computed lines.
+    - ALL sheets (same settings): recompute every selected sheet using current settings.
     """
     wb = openpyxl.load_workbook(io.BytesIO(_uploaded_bytes), read_only=False, data_only=False)
 
     apply_mode_local = st.session_state.get("apply_mode", "Bundle sheets (saved)")
     selected_local = st.session_state.get("all_sheets_selected", [])
 
-    # Decide which sheets/lines to apply
-    to_apply = {}
+    # Load mappings once
+    mapping = load_mapping(customer)
 
-    if apply_mode_local == "Bundle sheets (saved)" and st.session_state.bundle:
-        to_apply = st.session_state.bundle
-    elif apply_mode_local == "Current sheet only":
-        to_apply = {sheet_name: {"lines": lines.copy(), "settings": {}}}
-    elif apply_mode_local == "ALL sheets (same settings)":
-        # Recompute per sheet using current settings
-        # reuse stock mapping + std rate map
-        mapping = load_mapping(customer)
+    def compute_lines_for_sheet(sh: str, settings: dict) -> pd.DataFrame:
+        if sh not in wb.sheetnames:
+            return pd.DataFrame()
+        ws_local = wb[sh]
 
-        def compute_lines_for_sheet(sh: str) -> pd.DataFrame:
-            if sh not in wb.sheetnames:
-                return pd.DataFrame()
-            ws_local = wb[sh]
+        # settings with fallbacks
+        size_r = int(settings.get("size_row", size_row))
+        mat_r = int(settings.get("mat_row", mat_row))
+        sides_r = int(settings.get("sides_row", sides_row))
+        qty_r = int(settings.get("qty_row", qty_row))
+        start_col = str(settings.get("start_col_letter", start_col_letter)).strip().upper()
+        end_col = str(settings.get("end_col_letter", end_col_letter)).strip().upper()
+        units_local = str(settings.get("units", units))
+        # ds_loading_pct stored as decimal (0.2)
+        ds_local = float(settings.get("ds_loading_pct", ds_loading_pct))
+        skip_zero_local = bool(settings.get("skip_zero_qty", skip_zero_qty))
 
-            # column range
-            def col_idx(letter: str) -> int:
-                letter = (letter or "").strip().upper()
-                return column_index_from_string(letter)
+        u_local = {"mm":1.0,"cm":10.0,"m":1000.0}.get(units_local, 1.0)
 
-            c_start = col_idx(start_col_letter)
-            c_end = col_idx(end_col_letter)
-            if c_start > c_end:
-                c_start, c_end = c_end, c_start
+        def col_idx(letter: str) -> int:
+            letter = (letter or "").strip().upper()
+            return column_index_from_string(letter)
 
-            items = []
-            for c in range(c_start, c_end + 1):
-                size_val = ws_local.cell(row=int(size_row), column=c).value
-                mat_val  = ws_local.cell(row=int(mat_row), column=c).value
-                sides_val= ws_local.cell(row=int(sides_row), column=c).value
-                qty_val  = ws_local.cell(row=int(qty_row), column=c).value
+        c_start = col_idx(start_col)
+        c_end = col_idx(end_col)
+        if c_start > c_end:
+            c_start, c_end = c_end, c_start
 
-                qty = pd.to_numeric(eval_qty_value(qty_val, ws_local), errors="coerce")
-                if skip_zero_qty and (pd.isna(qty) or float(qty) <= 0):
-                    continue
+        items = []
+        for c in range(c_start, c_end + 1):
+            size_val = ws_local.cell(row=size_r, column=c).value
+            mat_val  = ws_local.cell(row=mat_r, column=c).value
+            sides_val= ws_local.cell(row=sides_r, column=c).value
+            qty_val  = ws_local.cell(row=qty_r, column=c).value
 
-                size_text = "" if size_val is None else str(size_val)
-                geo = parse_size_text(size_text)
-                shape = geo["shape"] if geo["shape"] != "unknown" else "rectangle"
+            qty = pd.to_numeric(eval_qty_value(qty_val, ws_local), errors="coerce")
+            if skip_zero_local and (pd.isna(qty) or float(qty) <= 0):
+                continue
 
-                width_mm = geo["width_mm"] * u if pd.notna(geo["width_mm"]) else np.nan
-                height_mm = geo["height_mm"] * u if pd.notna(geo["height_mm"]) else np.nan
-                diameter_mm = geo["diameter_mm"] * u if pd.notna(geo["diameter_mm"]) else np.nan
+            size_text = "" if size_val is None else str(size_val)
+            geo = parse_size_text(size_text)
+            shape = geo["shape"] if geo["shape"] != "unknown" else "rectangle"
 
-                sides = sides_normalize(sides_val, default=default_sides)
+            width_mm = geo["width_mm"] * u_local if pd.notna(geo["width_mm"]) else np.nan
+            height_mm = geo["height_mm"] * u_local if pd.notna(geo["height_mm"]) else np.nan
+            diameter_mm = geo["diameter_mm"] * u_local if pd.notna(geo["diameter_mm"]) else np.nan
 
-                items.append({
-                    "origin_col": c,
-                    "col_letter": get_column_letter(c),
-                    "qty": float(qty) if pd.notna(qty) else 0.0,
-                    "sides": sides,
-                    "size_text": size_text,
-                    "shape": shape,
-                    "width_mm": width_mm,
-                    "height_mm": height_mm,
-                    "diameter_mm": diameter_mm,
-                    "stock_customer": "" if mat_val is None else str(mat_val),
-                })
+            sides_norm = sides_normalize(sides_val, default=default_sides)
 
-            df = pd.DataFrame(items)
-            if len(df) == 0:
-                return df
+            items.append({
+                "origin_col": c,
+                "col_letter": get_column_letter(c),
+                "qty": float(qty) if pd.notna(qty) else 0.0,
+                "sides": sides_norm,
+                "size_text": size_text,
+                "shape": shape,
+                "width_mm": width_mm,
+                "height_mm": height_mm,
+                "diameter_mm": diameter_mm,
+                "stock_customer": "" if mat_val is None else str(mat_val),
+            })
 
-            df["sqm_each"] = df.apply(lambda r: sqm_calc(r["shape"], r["width_mm"], r["height_mm"], r["diameter_mm"]), axis=1)
-            df["total_sqm"] = pd.to_numeric(df["sqm_each"], errors="coerce") * pd.to_numeric(df["qty"], errors="coerce")
-
-            df["stock_std"] = df["stock_customer"].apply(lambda x: mapping["mappings"].get(clean_text(x), ""))
-            df["sqm_rate"] = df["stock_std"].map(std_rate_map)
-            df["ds_factor"] = np.where(df["sides"].astype(str) == "DS", 1.0 + ds_loading_pct, 1.0)
-            df["line_total"] = (
-                pd.to_numeric(df["total_sqm"], errors="coerce")
-                * pd.to_numeric(df["sqm_rate"], errors="coerce")
-                * pd.to_numeric(df["ds_factor"], errors="coerce")
-            )
+        df = pd.DataFrame(items)
+        if len(df) == 0:
             return df
 
+        df["sqm_each"] = df.apply(lambda r: sqm_calc(r["shape"], r["width_mm"], r["height_mm"], r["diameter_mm"]), axis=1)
+        df["total_sqm"] = pd.to_numeric(df["sqm_each"], errors="coerce") * pd.to_numeric(df["qty"], errors="coerce")
+
+        df["stock_std"] = df["stock_customer"].apply(lambda x: mapping["mappings"].get(clean_text(x), ""))
+        df["sqm_rate"] = df["stock_std"].map(std_rate_map)
+        df["ds_factor"] = np.where(df["sides"].astype(str) == "DS", 1.0 + ds_local, 1.0)
+        df["line_total"] = (
+            pd.to_numeric(df["total_sqm"], errors="coerce")
+            * pd.to_numeric(df["sqm_rate"], errors="coerce")
+            * pd.to_numeric(df["ds_factor"], errors="coerce")
+        )
+        return df
+
+    # Decide which sheets to apply
+    to_apply = {}  # sh -> df_lines
+    applied_settings = {}  # sh -> settings
+
+    if apply_mode_local == "Bundle sheets (saved)" and st.session_state.bundle:
+        for sh, data in st.session_state.bundle.items():
+            settings = data.get("settings", {}) if isinstance(data, dict) else {}
+            df_lines = compute_lines_for_sheet(sh, settings)
+            to_apply[sh] = df_lines
+            applied_settings[sh] = settings
+    elif apply_mode_local == "Current sheet only":
+        to_apply = {sheet_name: lines.copy()}
+        applied_settings[sheet_name] = {
+            "size_row": int(size_row), "mat_row": int(mat_row), "sides_row": int(sides_row), "qty_row": int(qty_row),
+            "start_col_letter": str(start_col_letter).strip().upper(), "end_col_letter": str(end_col_letter).strip().upper(),
+            "units": units, "ds_loading_pct": float(ds_loading_pct), "skip_zero_qty": bool(skip_zero_qty),
+        }
+    elif apply_mode_local == "ALL sheets (same settings)":
+        settings = {
+            "size_row": int(size_row), "mat_row": int(mat_row), "sides_row": int(sides_row), "qty_row": int(qty_row),
+            "start_col_letter": str(start_col_letter).strip().upper(), "end_col_letter": str(end_col_letter).strip().upper(),
+            "units": units, "ds_loading_pct": float(ds_loading_pct), "skip_zero_qty": bool(skip_zero_qty),
+        }
         selected = selected_local if selected_local else wb.sheetnames
         for sh in selected:
-            df_lines = compute_lines_for_sheet(sh)
-            to_apply[sh] = {"lines": df_lines, "settings": {}}
+            to_apply[sh] = compute_lines_for_sheet(sh, settings)
+            applied_settings[sh] = settings
     else:
-        # fallback
-        to_apply = {sheet_name: {"lines": lines.copy(), "settings": {}}}
+        to_apply = {sheet_name: lines.copy()}
 
+    # Write values
     applied_sheets = []
-    for sh, data in to_apply.items():
-        if sh not in wb.sheetnames:
+    for sh, df_lines in to_apply.items():
+        if sh not in wb.sheetnames or df_lines is None or len(df_lines) == 0:
             continue
         ws = wb[sh]
-        df_lines = data.get("lines", pd.DataFrame())
-        if df_lines is None or len(df_lines) == 0:
-            continue
         for _, r in df_lines.iterrows():
             c = int(r["origin_col"])
             val = r.get("line_total")
@@ -845,15 +870,13 @@ def export_preserving_excel_all_sheets() -> bytes:
         if name in wb.sheetnames:
             del wb[name]
 
-    # Build combined line items for summary/detail
     all_rows = []
-    for sh, data in to_apply.items():
-        df_lines = data.get("lines", pd.DataFrame())
+    for sh, df_lines in to_apply.items():
         if df_lines is None or len(df_lines) == 0:
             continue
-        df_lines2 = df_lines.copy()
-        df_lines2["sheet"] = sh
-        all_rows.append(df_lines2)
+        df2 = df_lines.copy()
+        df2["sheet"] = sh
+        all_rows.append(df2)
     all_df = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
 
     total_sqm_all = float(pd.to_numeric(all_df.get("total_sqm", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if len(all_df) else 0.0
