@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v11-history-visible-apply-all-sheets-ds-text"
+APP_VERSION = "row-based-v12-apply-all-sheets-fix-currency-format"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -553,10 +553,10 @@ st.subheader("Export output location")
 st.caption("By default, price is written **next to the Qty row** (Qty row + 1).")
 price_row = st.number_input("Write price into row (1-indexed)", 1, 5000, int(qty_row)+1, 1, key="price_row")
 
-apply_mode = st.radio("Apply prices to", ["Bundle sheets (saved)", "Current sheet only", "ALL sheets (same settings)"], index=0, horizontal=True)
+apply_mode = st.radio("Apply prices to", ["Bundle sheets (saved)", "Current sheet only", "ALL sheets (same settings)"], index=2, horizontal=True, key="apply_mode")
 all_sheets_selected = []
 if apply_mode == "ALL sheets (same settings)":
-    all_sheets_selected = st.multiselect("Select sheets to update", options=sheet_names, default=sheet_names)
+    all_sheets_selected = st.multiselect("Select sheets to update", options=sheet_names, default=sheet_names, key="all_sheets_selected")
 
 # ---------- Extract row-based items ----------
 uploaded.seek(0)
@@ -733,14 +733,17 @@ def export_preserving_excel_all_sheets() -> bytes:
     """
     wb = openpyxl.load_workbook(io.BytesIO(_uploaded_bytes), read_only=False, data_only=False)
 
+    apply_mode_local = st.session_state.get("apply_mode", "Bundle sheets (saved)")
+    selected_local = st.session_state.get("all_sheets_selected", [])
+
     # Decide which sheets/lines to apply
     to_apply = {}
 
-    if apply_mode == "Bundle sheets (saved)" and st.session_state.bundle:
+    if apply_mode_local == "Bundle sheets (saved)" and st.session_state.bundle:
         to_apply = st.session_state.bundle
-    elif apply_mode == "Current sheet only":
+    elif apply_mode_local == "Current sheet only":
         to_apply = {sheet_name: {"lines": lines.copy(), "settings": {}}}
-    elif apply_mode == "ALL sheets (same settings)":
+    elif apply_mode_local == "ALL sheets (same settings)":
         # Recompute per sheet using current settings
         # reuse stock mapping + std rate map
         mapping = load_mapping(customer)
@@ -811,7 +814,7 @@ def export_preserving_excel_all_sheets() -> bytes:
             )
             return df
 
-        selected = all_sheets_selected if all_sheets_selected else wb.sheetnames
+        selected = selected_local if selected_local else wb.sheetnames
         for sh in selected:
             df_lines = compute_lines_for_sheet(sh)
             to_apply[sh] = {"lines": df_lines, "settings": {}}
@@ -834,8 +837,7 @@ def export_preserving_excel_all_sheets() -> bytes:
                 continue
             cell = ws.cell(row=int(price_row), column=c)
             cell.value = float(val)
-            if not cell.number_format:
-                cell.number_format = "0.00"
+            cell.number_format = "$#,##0.00"
         applied_sheets.append(sh)
 
     # Refresh summary sheets
@@ -861,7 +863,7 @@ def export_preserving_excel_all_sheets() -> bytes:
     sum_rows = [
         ("Customer", customer),
         ("Applied sheets", ", ".join(applied_sheets) if applied_sheets else "(none)"),
-        ("Apply mode", apply_mode),
+        ("Apply mode", apply_mode_local),
         ("Price row", int(price_row)),
         ("DS loading %", f"{ds_loading_pct*100:.0f}%"),
         ("Total SQM", f"{total_sqm_all:,.3f}"),
@@ -947,6 +949,8 @@ with b2:
     )
 
 with st.expander("Version / Debug", expanded=False):
+    st.write("Last export apply mode:", st.session_state.get("apply_mode"))
+    st.write("Selected sheets:", st.session_state.get("all_sheets_selected"))
     st.write("APP VERSION:", APP_VERSION)
     st.write("Columns processed:", f"{start_col_letter}:{end_col_letter}")
     st.write("Rows:", dict(size_row=int(size_row), material_row=int(mat_row), sides_row=int(sides_row), qty_row=int(qty_row), price_row=int(price_row)))
