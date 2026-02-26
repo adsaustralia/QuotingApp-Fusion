@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v7-restore-saved-settings"
+APP_VERSION = "row-based-v9-bundle-json-export-import"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -21,6 +21,8 @@ if "bundle" not in st.session_state:
     st.session_state.bundle = {}  # {sheet_name: {"lines": df}}
 if "_force_restore" not in st.session_state:
     st.session_state._force_restore = False
+if "_skip_restore_once" not in st.session_state:
+    st.session_state._skip_restore_once = False
 
 # ---------- helpers ----------
 def clean_text(s) -> str:
@@ -40,6 +42,44 @@ def load_mapping(customer: str) -> dict:
 def save_mapping(customer: str, mapping: dict) -> None:
     fp = MAPPING_DIR / f"{clean_text(customer).replace(' ', '_')}_stock_map.json"
     fp.write_text(json.dumps(mapping, indent=2), encoding="utf-8")
+
+
+def serialize_bundle(bundle: dict) -> dict:
+    """
+    Convert session bundle (dfs) into JSON-serializable structure.
+    NOTE: This stores calculated line_totals and settings, not the original workbook.
+    """
+    out = {}
+    for sh, data in (bundle or {}).items():
+        settings = data.get("settings", {}) if isinstance(data, dict) else {}
+        df = data.get("lines") if isinstance(data, dict) else None
+        if df is None:
+            continue
+        try:
+            lines_records = df.to_dict(orient="records")
+        except Exception:
+            lines_records = []
+        out[sh] = {"settings": settings, "lines": lines_records}
+    return out
+
+def deserialize_bundle(obj: dict) -> dict:
+    """
+    Convert JSON structure back into session bundle (dfs).
+    """
+    bundle = {}
+    if not isinstance(obj, dict):
+        return bundle
+    for sh, data in obj.items():
+        if not isinstance(data, dict):
+            continue
+        settings = data.get("settings", {})
+        lines_records = data.get("lines", [])
+        try:
+            df = pd.DataFrame(lines_records)
+        except Exception:
+            df = pd.DataFrame()
+        bundle[sh] = {"settings": settings, "lines": df}
+    return bundle
 
 def parse_size_text(text: str):
     """
@@ -262,6 +302,37 @@ with st.sidebar:
         st.session_state.bundle = {}
         st.success("Bundle cleared.")
 
+    st.subheader("Export / Import bundle settings")
+    # Export bundle JSON
+    try:
+        _bundle_payload = {
+            "app_version": APP_VERSION,
+            "customer": customer,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "price_row": int(st.session_state.get("price_row", 0)) if "price_row" in st.session_state else None,
+            "bundle": serialize_bundle(st.session_state.bundle),
+        }
+        _bundle_json = json.dumps(_bundle_payload, indent=2)
+        st.download_button(
+            "Download Bundle JSON",
+            data=_bundle_json.encode("utf-8"),
+            file_name=f"bundle_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+            mime="application/json",
+        )
+    except Exception as e:
+        st.caption("Bundle JSON export not available yet.")
+
+    # Import bundle JSON
+    bundle_file = st.file_uploader("Import Bundle JSON", type=["json"], key="bundle_json_upload")
+    if bundle_file is not None:
+        try:
+            payload = json.loads(bundle_file.getvalue().decode("utf-8"))
+            new_bundle = deserialize_bundle(payload.get("bundle", {}))
+            st.session_state.bundle = new_bundle
+            st.success(f"Imported bundle with {len(new_bundle)} sheet(s).")
+        except Exception as e:
+            st.error("Could not import this JSON file. Make sure it is a bundle exported from this app.")
+
     st.divider()
     st.header("Standard stock rates")
     st.caption("CSV columns required: stock_name_std, sqm_rate")
@@ -295,13 +366,16 @@ wb_ro.close()
 
 top1, top2 = st.columns([2,1])
 sheet_name = top1.selectbox("Sheet", sheet_names, index=0)
-units = top2.selectbox("Units", ["mm","cm","m"], index=0, key="units")
-auto_save_on_open = st.checkbox("Auto-save this sheet to bundle when opened", value=False)
 
-# Restore saved settings for this sheet (if available)
+# Restore saved settings for this sheet BEFORE widgets are created (Streamlit requirement)
 _saved = st.session_state.bundle.get(sheet_name, {}).get("settings")
 _do_restore = bool(_saved) and (st.session_state.get("auto_restore", True) or st.session_state.get("_force_restore", False))
+if st.session_state.get("_skip_restore_once", False):
+    _do_restore = False
+    st.session_state._skip_restore_once = False
+
 if _do_restore:
+    # Set widget default states BEFORE the widgets are instantiated below
     st.session_state["size_row"] = int(_saved.get("size_row", 5))
     st.session_state["mat_row"] = int(_saved.get("mat_row", 6))
     st.session_state["sides_row"] = int(_saved.get("sides_row", 10))
@@ -313,6 +387,9 @@ if _do_restore:
     st.session_state["price_row"] = int(_saved.get("price_row", int(_saved.get("qty_row",57))+1))
     st.session_state["skip_zero_qty"] = bool(_saved.get("skip_zero_qty", True))
     st.session_state["_force_restore"] = False
+units = top2.selectbox("Units", ["mm","cm","m"], index=0, key="units")
+auto_save_on_open = st.checkbox("Auto-save this sheet to bundle when opened", value=False)
+
 u = {"mm":1.0,"cm":10.0,"m":1000.0}[units]
 
 # Preview (best-effort)
@@ -471,11 +548,13 @@ with bcol1:
         st.success(f"Saved '{sheet_name}' to bundle.")
 with bcol2:
     if st.button("Remove this sheet from bundle"):
+        st.session_state._skip_restore_once = True
         if sheet_name in st.session_state.bundle:
             del st.session_state.bundle[sheet_name]
             st.success(f"Removed '{sheet_name}' from bundle.")
         else:
             st.info("This sheet is not in the bundle.")
+        st.rerun()
 with bcol3:
     st.write("Sheets in bundle:", ", ".join(st.session_state.bundle.keys()) if st.session_state.bundle else "(none)")
 
