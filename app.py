@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v15-bundle-settings-fix-synonyms-and-log-used-settings"
+APP_VERSION = "row-based-v16-global-price-row-lock"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -515,7 +515,7 @@ if _do_restore:
     st.session_state["end_col_letter"] = str(_saved.get("end_col_letter", "Z"))
     st.session_state["units"] = str(_saved.get("units", "mm"))
     st.session_state["ds_loading_pct_pct"] = float(_saved.get("ds_loading_pct", 0.20)) * 100.0
-    st.session_state["price_row"] = int(_saved.get("price_row", int(_saved.get("qty_row",57))+1))
+    st.session_state["global_price_row"] = int(_saved.get("price_row", int(_saved.get("qty_row",57))+1))
     st.session_state["skip_zero_qty"] = bool(_saved.get("skip_zero_qty", True))
     st.session_state["_force_restore"] = False
 units = top2.selectbox("Units", ["mm","cm","m"], index=0, key="units")
@@ -551,7 +551,13 @@ skip_zero_qty    = r3.checkbox("Skip columns with Qty <= 0", value=True, key="sk
 
 st.subheader("Export output location")
 st.caption("By default, price is written **next to the Qty row** (Qty row + 1).")
-price_row = st.number_input("Write price into row (1-indexed)", 1, 5000, int(qty_row)+1, 1, key="price_row")
+if "global_price_row" not in st.session_state:
+    # initialize once (do NOT change when switching sheets)
+    st.session_state["global_price_row"] = int(st.session_state.get("qty_row", int(qty_row))) + 1
+global_price_row = st.number_input("Write price into row (GLOBAL, 1-indexed)", 1, 5000, int(st.session_state["global_price_row"]), 1, key="global_price_row")
+# keep old variable name for minimal changes below
+price_row = int(global_price_row)
+
 
 apply_mode = st.radio("Apply prices to", ["Bundle sheets (saved)", "Current sheet only", "ALL sheets (same settings)"], index=0, horizontal=True, key="apply_mode")
 all_sheets_selected = []
@@ -679,7 +685,7 @@ with bcol1:
     "end_col_letter": str(end_col_letter).strip().upper(),
     "units": units,
     "ds_loading_pct": float(ds_loading_pct),
-    "price_row": int(price_row),
+    "price_row": int(st.session_state.get("global_price_row", price_row)),
     "skip_zero_qty": bool(skip_zero_qty),
 }}
         st.success(f"Saved '{sheet_name}' to bundle.")
@@ -722,7 +728,7 @@ if auto_save_on_open and sheet_name not in st.session_state.bundle:
     "end_col_letter": str(end_col_letter).strip().upper(),
     "units": units,
     "ds_loading_pct": float(ds_loading_pct),
-    "price_row": int(price_row),
+    "price_row": int(st.session_state.get("global_price_row", price_row)),
     "skip_zero_qty": bool(skip_zero_qty),
 }}
     st.info(f"Auto-saved '{sheet_name}' to bundle.")
@@ -1022,7 +1028,7 @@ with st.expander("Save to History", expanded=True):
             "loss_reason": hist_loss_reason,
             "sell_price": hist_sell_price,
             "notes": hist_notes,
-            "price_row": int(price_row),
+            "price_row": int(st.session_state.get("global_price_row", price_row)),
             "ds_loading_pct": float(ds_loading_pct),
             "applied_sheets": list(to_apply.keys()),
             "total_sqm": total_sqm_all,
