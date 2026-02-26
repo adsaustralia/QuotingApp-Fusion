@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v4-size-parser-w800-h1700"
+APP_VERSION = "row-based-v5-eval-sum-formulas-and-export-safe"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -130,6 +130,44 @@ def sides_normalize(val: str, default="SS"):
     if t in ("ss","1s","single","1pp","one","single sided","single-sided"):
         return "SS"
     return default
+
+def eval_qty_value(qty_cell_val, ws):
+    """
+    If qty is a number -> return it.
+    If qty is a simple Excel SUM formula like "=SUM(AB13:AB56)" -> compute it from sheet cells.
+    Otherwise -> try numeric conversion.
+    """
+    if qty_cell_val is None:
+        return np.nan
+
+    # direct number
+    if isinstance(qty_cell_val, (int, float)) and not (isinstance(qty_cell_val, float) and np.isnan(qty_cell_val)):
+        return float(qty_cell_val)
+
+    s = str(qty_cell_val).strip()
+    # try numeric string
+    n = pd.to_numeric(s, errors="coerce")
+    if pd.notna(n):
+        return float(n)
+
+    # SUM(range)
+    m = re.match(r"^=\s*sum\s*\(\s*([A-Z]+\d+)\s*:\s*([A-Z]+\d+)\s*\)\s*$", s, flags=re.IGNORECASE)
+    if m:
+        a1, b1 = m.group(1).upper(), m.group(2).upper()
+        try:
+            cells = ws[a1:b1]
+            total = 0.0
+            for row in cells:
+                for c in row:
+                    v = c.value
+                    vv = pd.to_numeric(v, errors="coerce")
+                    if pd.notna(vv):
+                        total += float(vv)
+            return total
+        except Exception:
+            return np.nan
+
+    return np.nan
 
 def export_quote_pdf(df_summary: pd.DataFrame, df_lines: pd.DataFrame, title="Quote") -> bytes:
     from reportlab.lib.pagesizes import A4
@@ -278,7 +316,7 @@ price_row = st.number_input("Write price into row (1-indexed)", 1, 5000, int(qty
 
 # ---------- Extract row-based items ----------
 uploaded.seek(0)
-wb = openpyxl.load_workbook(uploaded, read_only=False, data_only=True)
+wb = openpyxl.load_workbook(uploaded, read_only=False, data_only=False)
 ws = wb[sheet_name]
 
 def col_idx(letter: str) -> int:
@@ -297,7 +335,7 @@ for c in range(c_start, c_end+1):
     sides_val= ws.cell(row=int(sides_row), column=c).value
     qty_val  = ws.cell(row=int(qty_row), column=c).value
 
-    qty = pd.to_numeric(qty_val, errors="coerce")
+    qty = pd.to_numeric(eval_qty_value(qty_val, ws), errors="coerce")
     if skip_zero_qty and (pd.isna(qty) or float(qty) <= 0):
         continue
 
