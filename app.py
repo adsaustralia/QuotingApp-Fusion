@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v19-sqm-tier-markups"
+APP_VERSION = "row-based-v21-export-fixed-stable"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -586,13 +586,27 @@ price_row = st.number_input("Write price into row (1-indexed)", 1, 5000, int(qty
 apply_mode = st.radio("Apply prices to", ["Bundle sheets (saved)", "Current sheet only", "ALL sheets (same settings)"], index=0, horizontal=True, key="apply_mode")
 all_sheets_selected = []
 if apply_mode == "ALL sheets (same settings)":
-    all_sheets_selected = st.multiselect("Select sheets to update", options=sheet_names, default=sheet_names, key="all_sheets_selected")
-write_zero_when_missing_rate = st.checkbox
+    all_sheets_selected = st.multiselect(
+        "Select sheets to update",
+        options=sheet_names,
+        default=sheet_names,
+        key="all_sheets_selected",
+    )
 
 bundle_export_selection = []
 if apply_mode == "Bundle sheets (saved)" and st.session_state.bundle:
-    bundle_export_selection = st.multiselect("Bundle sheets to export", options=list(st.session_state.bundle.keys()), default=list(st.session_state.bundle.keys()), key="bundle_export_selection")
-write_zero_when_missing_rate = st.checkboxwrite_zero_when_missing_rate = st.checkbox("Write $0.00 when rate/mapping missing (otherwise leave blank)", value=False, key="write_zero_when_missing_rate")
+    bundle_export_selection = st.multiselect(
+        "Bundle sheets to export",
+        options=list(st.session_state.bundle.keys()),
+        default=list(st.session_state.bundle.keys()),
+        key="bundle_export_selection",
+    )
+
+write_zero_when_missing_rate = st.checkbox(
+    "Write $0.00 when rate/mapping missing (otherwise leave blank)",
+    value=False,
+    key="write_zero_when_missing_rate",
+)
 
 # ---------- Extract row-based items ----------
 uploaded.seek(0)
@@ -820,6 +834,9 @@ def export_preserving_excel_all_sheets() -> bytes:
         out["units"] = s.get("units", units)
         out["ds_loading_pct"] = s.get("ds_loading_pct", ds_loading_pct)
         out["skip_zero_qty"] = s.get("skip_zero_qty", skip_zero_qty)
+        out["sqm_markup_0_1"] = s.get("sqm_markup_0_1", sqm_markup_0_1)
+        out["sqm_markup_1_3"] = s.get("sqm_markup_1_3", sqm_markup_1_3)
+        out["sqm_markup_3_5"] = s.get("sqm_markup_3_5", sqm_markup_3_5)
         out["price_row"] = s.get("price_row", s.get("output_row", None))
         return out
 
@@ -844,6 +861,9 @@ def export_preserving_excel_all_sheets() -> bytes:
         units_local = str(ns.get("units", units))
         ds_local = float(ns.get("ds_loading_pct", ds_loading_pct))
         skip_zero_local = bool(ns.get("skip_zero_qty", skip_zero_qty))
+        sqm_markup_0_1_local = float(ns.get("sqm_markup_0_1", sqm_markup_0_1))
+        sqm_markup_1_3_local = float(ns.get("sqm_markup_1_3", sqm_markup_1_3))
+        sqm_markup_3_5_local = float(ns.get("sqm_markup_3_5", sqm_markup_3_5))
 
         u_local = {"mm":1.0,"cm":10.0,"m":1000.0}.get(units_local, 1.0)
 
@@ -920,10 +940,12 @@ def export_preserving_excel_all_sheets() -> bytes:
         if write_zero_missing and missing_count > 0:
             df.loc[missing_map, "sqm_rate"] = 0.0
         df["ds_factor"] = np.where(df["sides"].astype(str) == "DS", 1.0 + ds_local, 1.0)
+        df["sqm_markup_factor"] = df["sqm_each"].apply(lambda x: sqm_markup_factor(x, sqm_markup_0_1_local, sqm_markup_1_3_local, sqm_markup_3_5_local))
         df["line_total"] = (
             pd.to_numeric(df["total_sqm"], errors="coerce")
             * pd.to_numeric(df["sqm_rate"], errors="coerce")
             * pd.to_numeric(df["ds_factor"], errors="coerce")
+            * pd.to_numeric(df["sqm_markup_factor"], errors="coerce")
         )
         diag_rows.append({
             "sheet": sh,
