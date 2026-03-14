@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v19-sqm-tier-markups"
+APP_VERSION = "row-based-v18-syntax-fix-checkbox"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -199,25 +199,6 @@ def sqm_calc(shape: str, width_mm=None, height_mm=None, diameter_mm=None):
         r = (float(diameter_mm)/1000.0)/2.0
         return math.pi * (r**2)
     return np.nan
-
-def sqm_markup_factor(sqm_each, pct_0_1=250.0, pct_1_3=80.0, pct_3_5=35.0):
-    """
-    0 to 1 sqm   -> +250%
-    >1 to 3 sqm  -> +80%
-    >3 to 5 sqm  -> +35%
-    >5 sqm       -> normal
-    """
-    v = pd.to_numeric(sqm_each, errors="coerce")
-    if pd.isna(v):
-        return np.nan
-    v = float(v)
-    if 0 <= v <= 1:
-        return 1.0 + (pct_0_1 / 100.0)
-    if 1 < v <= 3:
-        return 1.0 + (pct_1_3 / 100.0)
-    if 3 < v <= 5:
-        return 1.0 + (pct_3_5 / 100.0)
-    return 1.0
 
 def sides_normalize(val: str, default="SS"):
     t = clean_text(val)
@@ -536,9 +517,6 @@ if _do_restore:
     st.session_state["ds_loading_pct_pct"] = float(_saved.get("ds_loading_pct", 0.20)) * 100.0
     st.session_state["price_row"] = int(_saved.get("price_row", int(_saved.get("qty_row",57))+1))
     st.session_state["skip_zero_qty"] = bool(_saved.get("skip_zero_qty", True))
-    st.session_state["sqm_markup_0_1"] = float(_saved.get("sqm_markup_0_1", 250.0))
-    st.session_state["sqm_markup_1_3"] = float(_saved.get("sqm_markup_1_3", 80.0))
-    st.session_state["sqm_markup_3_5"] = float(_saved.get("sqm_markup_3_5", 35.0))
     st.session_state["_force_restore"] = False
 units = top2.selectbox("Units", ["mm","cm","m"], index=0, key="units")
 auto_save_on_open = st.checkbox("Auto-save this sheet to bundle when opened", value=False)
@@ -564,13 +542,6 @@ qty_row  = c4.number_input("Qty row", 1, 5000, 57, 1, key="qty_row")
 default_sides = c5.radio("Default sides (if blank)", ["SS","DS"], index=0, horizontal=True, key="default_sides")
 
 ds_loading_pct = st.number_input("DS loading (%)", min_value=0.0, max_value=100.0, value=20.0, step=1.0, key="ds_loading_pct_pct") / 100.0
-
-st.subheader("SQM markup rules")
-mk1, mk2, mk3 = st.columns(3)
-sqm_markup_0_1 = mk1.number_input("0 to 1 sqm markup (%)", min_value=0.0, max_value=1000.0, value=250.0, step=5.0, key="sqm_markup_0_1")
-sqm_markup_1_3 = mk2.number_input("1 to 3 sqm markup (%)", min_value=0.0, max_value=1000.0, value=80.0, step=5.0, key="sqm_markup_1_3")
-sqm_markup_3_5 = mk3.number_input("3 to 5 sqm markup (%)", min_value=0.0, max_value=1000.0, value=35.0, step=5.0, key="sqm_markup_3_5")
-st.caption(">5 sqm uses normal rate (no extra markup).")
 
 st.subheader("Pick COLUMN range")
 r1, r2, r3 = st.columns([1.2,1.2,1.6])
@@ -688,18 +659,16 @@ lines["sqm_rate"] = lines["stock_std"].map(std_rate_map)
 
 # DS loading factor
 lines["ds_factor"] = np.where(lines["sides"].astype(str) == "DS", 1.0 + ds_loading_pct, 1.0)
-lines["sqm_markup_factor"] = lines["sqm_each"].apply(lambda x: sqm_markup_factor(x, sqm_markup_0_1, sqm_markup_1_3, sqm_markup_3_5))
 
 lines["line_total"] = (
     pd.to_numeric(lines["total_sqm"], errors="coerce")
     * pd.to_numeric(lines["sqm_rate"], errors="coerce")
     * pd.to_numeric(lines["ds_factor"], errors="coerce")
-    * pd.to_numeric(lines["sqm_markup_factor"], errors="coerce")
 )
 
 # ---------- Review ----------
 st.subheader("Quote Review")
-review = lines[["col_letter","qty","sides","ds_factor","shape","size_text","stock_customer","stock_std","sqm_each","total_sqm","sqm_rate","sqm_markup_factor","line_total"]].copy()
+review = lines[["col_letter","qty","sides","ds_factor","shape","size_text","stock_customer","stock_std","sqm_each","total_sqm","sqm_rate","line_total"]].copy()
 st.dataframe(review, use_container_width=True)
 
 # ----- Bundle controls -----
@@ -716,14 +685,8 @@ with bcol1:
     "end_col_letter": str(end_col_letter).strip().upper(),
     "units": units,
     "ds_loading_pct": float(ds_loading_pct),
-        "sqm_markup_0_1": float(sqm_markup_0_1),
-        "sqm_markup_1_3": float(sqm_markup_1_3),
-        "sqm_markup_3_5": float(sqm_markup_3_5),
     "price_row": int(st.session_state.get("price_row", price_row)),
     "skip_zero_qty": bool(skip_zero_qty),
-    "sqm_markup_0_1": float(sqm_markup_0_1),
-    "sqm_markup_1_3": float(sqm_markup_1_3),
-    "sqm_markup_3_5": float(sqm_markup_3_5),
 }}
         st.success(f"Saved '{sheet_name}' to bundle.")
 with bcol2:
@@ -767,9 +730,6 @@ if auto_save_on_open and sheet_name not in st.session_state.bundle:
     "ds_loading_pct": float(ds_loading_pct),
     "price_row": int(st.session_state.get("price_row", price_row)),
     "skip_zero_qty": bool(skip_zero_qty),
-    "sqm_markup_0_1": float(sqm_markup_0_1),
-    "sqm_markup_1_3": float(sqm_markup_1_3),
-    "sqm_markup_3_5": float(sqm_markup_3_5),
 }}
     st.info(f"Auto-saved '{sheet_name}' to bundle.")
 
