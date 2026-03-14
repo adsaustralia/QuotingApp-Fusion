@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v19-sqm-tier-markups"
+APP_VERSION = "row-based-v20-sqm-markup-visual-table"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -571,6 +571,19 @@ sqm_markup_0_1 = mk1.number_input("0 to 1 sqm markup (%)", min_value=0.0, max_va
 sqm_markup_1_3 = mk2.number_input("1 to 3 sqm markup (%)", min_value=0.0, max_value=1000.0, value=80.0, step=5.0, key="sqm_markup_1_3")
 sqm_markup_3_5 = mk3.number_input("3 to 5 sqm markup (%)", min_value=0.0, max_value=1000.0, value=35.0, step=5.0, key="sqm_markup_3_5")
 st.caption(">5 sqm uses normal rate (no extra markup).")
+
+st.markdown("**SQM markup preview**")
+markup_preview_df = pd.DataFrame({
+    "SQM Range": ["0 to 1 sqm", "1 to 3 sqm", "3 to 5 sqm", "5+ sqm"],
+    "Markup %": [sqm_markup_0_1, sqm_markup_1_3, sqm_markup_3_5, 0.0],
+    "Factor": [
+        round(1 + (sqm_markup_0_1 / 100.0), 2),
+        round(1 + (sqm_markup_1_3 / 100.0), 2),
+        round(1 + (sqm_markup_3_5 / 100.0), 2),
+        1.00
+    ]
+})
+st.dataframe(markup_preview_df, use_container_width=True, hide_index=True)
 
 st.subheader("Pick COLUMN range")
 r1, r2, r3 = st.columns([1.2,1.2,1.6])
