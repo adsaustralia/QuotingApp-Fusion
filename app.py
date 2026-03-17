@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v22-backend-markup-rules"
+APP_VERSION = "row-based-v23-backend-markup-and-ds-rules"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -18,6 +18,7 @@ HISTORY_DIR = DATA_DIR / "history"
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_STANDARD_STOCKS_CSV = DATA_DIR / "standard_stocks.csv"
 MARKUP_RULES_JSON = DATA_DIR / "markup_rules.json"
+DS_RULES_JSON = DATA_DIR / "ds_rules.json"
 
 # Session bundle holds per-sheet calculated results to apply later
 if "bundle" not in st.session_state:
@@ -59,6 +60,20 @@ def load_markup_rules() -> dict:
                 "pct_0_1": float(data.get("pct_0_1", default_rules["pct_0_1"])),
                 "pct_1_3": float(data.get("pct_1_3", default_rules["pct_1_3"])),
                 "pct_3_5": float(data.get("pct_3_5", default_rules["pct_3_5"])),
+            }
+        except Exception:
+            return default_rules
+    return default_rules
+
+def load_ds_rules() -> dict:
+    default_rules = {
+        "ds_loading_pct": 20.0
+    }
+    if DS_RULES_JSON.exists():
+        try:
+            data = json.loads(DS_RULES_JSON.read_text(encoding="utf-8"))
+            return {
+                "ds_loading_pct": float(data.get("ds_loading_pct", default_rules["ds_loading_pct"]))
             }
         except Exception:
             return default_rules
@@ -552,7 +567,6 @@ if _do_restore:
     st.session_state["start_col_letter"] = str(_saved.get("start_col_letter", "A"))
     st.session_state["end_col_letter"] = str(_saved.get("end_col_letter", "Z"))
     st.session_state["units"] = str(_saved.get("units", "mm"))
-    st.session_state["ds_loading_pct_pct"] = float(_saved.get("ds_loading_pct", 0.20)) * 100.0
     st.session_state["price_row"] = int(_saved.get("price_row", int(_saved.get("qty_row",57))+1))
     st.session_state["skip_zero_qty"] = bool(_saved.get("skip_zero_qty", True))
     st.session_state["_force_restore"] = False
@@ -579,7 +593,8 @@ sides_row= c3.number_input("Sides row", 1, 5000, 10, 1, key="sides_row")
 qty_row  = c4.number_input("Qty row", 1, 5000, 57, 1, key="qty_row")
 default_sides = c5.radio("Default sides (if blank)", ["SS","DS"], index=0, horizontal=True, key="default_sides")
 
-ds_loading_pct = st.number_input("DS loading (%)", min_value=0.0, max_value=100.0, value=20.0, step=1.0, key="ds_loading_pct_pct") / 100.0
+ds_rules = load_ds_rules()
+ds_loading_pct = float(ds_rules["ds_loading_pct"]) / 100.0
 markup_rules = load_markup_rules()
 sqm_markup_0_1 = float(markup_rules["pct_0_1"])
 sqm_markup_1_3 = float(markup_rules["pct_1_3"])
