@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v21-export-fixed-stable"
+APP_VERSION = "row-based-v22-backend-markup-rules"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -17,6 +17,7 @@ MAPPING_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_DIR = DATA_DIR / "history"
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_STANDARD_STOCKS_CSV = DATA_DIR / "standard_stocks.csv"
+MARKUP_RULES_JSON = DATA_DIR / "markup_rules.json"
 
 # Session bundle holds per-sheet calculated results to apply later
 if "bundle" not in st.session_state:
@@ -44,6 +45,24 @@ def load_mapping(customer: str) -> dict:
 def save_mapping(customer: str, mapping: dict) -> None:
     fp = MAPPING_DIR / f"{clean_text(customer).replace(' ', '_')}_stock_map.json"
     fp.write_text(json.dumps(mapping, indent=2), encoding="utf-8")
+
+def load_markup_rules() -> dict:
+    default_rules = {
+        "pct_0_1": 250.0,
+        "pct_1_3": 80.0,
+        "pct_3_5": 35.0,
+    }
+    if MARKUP_RULES_JSON.exists():
+        try:
+            data = json.loads(MARKUP_RULES_JSON.read_text(encoding="utf-8"))
+            return {
+                "pct_0_1": float(data.get("pct_0_1", default_rules["pct_0_1"])),
+                "pct_1_3": float(data.get("pct_1_3", default_rules["pct_1_3"])),
+                "pct_3_5": float(data.get("pct_3_5", default_rules["pct_3_5"])),
+            }
+        except Exception:
+            return default_rules
+    return default_rules
 
 
 def serialize_bundle(bundle: dict) -> dict:
@@ -536,9 +555,6 @@ if _do_restore:
     st.session_state["ds_loading_pct_pct"] = float(_saved.get("ds_loading_pct", 0.20)) * 100.0
     st.session_state["price_row"] = int(_saved.get("price_row", int(_saved.get("qty_row",57))+1))
     st.session_state["skip_zero_qty"] = bool(_saved.get("skip_zero_qty", True))
-    st.session_state["sqm_markup_0_1"] = float(_saved.get("sqm_markup_0_1", 250.0))
-    st.session_state["sqm_markup_1_3"] = float(_saved.get("sqm_markup_1_3", 80.0))
-    st.session_state["sqm_markup_3_5"] = float(_saved.get("sqm_markup_3_5", 35.0))
     st.session_state["_force_restore"] = False
 units = top2.selectbox("Units", ["mm","cm","m"], index=0, key="units")
 auto_save_on_open = st.checkbox("Auto-save this sheet to bundle when opened", value=False)
@@ -564,13 +580,11 @@ qty_row  = c4.number_input("Qty row", 1, 5000, 57, 1, key="qty_row")
 default_sides = c5.radio("Default sides (if blank)", ["SS","DS"], index=0, horizontal=True, key="default_sides")
 
 ds_loading_pct = st.number_input("DS loading (%)", min_value=0.0, max_value=100.0, value=20.0, step=1.0, key="ds_loading_pct_pct") / 100.0
+markup_rules = load_markup_rules()
+sqm_markup_0_1 = float(markup_rules["pct_0_1"])
+sqm_markup_1_3 = float(markup_rules["pct_1_3"])
+sqm_markup_3_5 = float(markup_rules["pct_3_5"])
 
-st.subheader("SQM markup rules")
-mk1, mk2, mk3 = st.columns(3)
-sqm_markup_0_1 = mk1.number_input("0 to 1 sqm markup (%)", min_value=0.0, max_value=1000.0, value=250.0, step=5.0, key="sqm_markup_0_1")
-sqm_markup_1_3 = mk2.number_input("1 to 3 sqm markup (%)", min_value=0.0, max_value=1000.0, value=80.0, step=5.0, key="sqm_markup_1_3")
-sqm_markup_3_5 = mk3.number_input("3 to 5 sqm markup (%)", min_value=0.0, max_value=1000.0, value=35.0, step=5.0, key="sqm_markup_3_5")
-st.caption(">5 sqm uses normal rate (no extra markup).")
 
 st.subheader("Pick COLUMN range")
 r1, r2, r3 = st.columns([1.2,1.2,1.6])

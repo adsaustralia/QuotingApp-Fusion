@@ -9,3 +9,6 @@ Includes:
 - DS loading
 - SQM tier markups
 - history page
+
+
+SQM markup rules are loaded from `data/markup_rules.json` and hidden from the UI.
