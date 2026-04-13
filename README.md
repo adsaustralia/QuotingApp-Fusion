@@ -15,3 +15,6 @@ SQM markup rules are loaded from `data/markup_rules.json` and hidden from the UI
 
 
 Double-sided loading is now loaded from `data/ds_rules.json` and hidden from the UI.
+
+
+Adds a Material Cost Summary to the on-screen totals and the exported Quote Summary sheet.

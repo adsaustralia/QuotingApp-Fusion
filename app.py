@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v24-total-sqm-factor"
+APP_VERSION = "row-based-v25-material-cost-summary"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -731,7 +731,7 @@ lines["sqm_rate"] = lines["stock_std"].map(std_rate_map)
 
 # DS loading factor
 lines["ds_factor"] = np.where(lines["sides"].astype(str) == "DS", 1.0 + ds_loading_pct, 1.0)
-lines["sqm_markup_factor"] = lines["total_sqm"].apply(lambda x: sqm_markup_factor(x, sqm_markup_0_1, sqm_markup_1_3, sqm_markup_3_5))
+lines["sqm_markup_factor"] = lines["sqm_each"].apply(lambda x: sqm_markup_factor(x, sqm_markup_0_1, sqm_markup_1_3, sqm_markup_3_5))
 
 lines["line_total"] = (
     pd.to_numeric(lines["total_sqm"], errors="coerce")
@@ -829,6 +829,17 @@ summary = pd.DataFrame([
 
 st.markdown("**Totals**")
 st.table(summary)
+
+if len(lines):
+    st.markdown("**Material cost summary**")
+    material_key_ui = "stock_std" if "stock_std" in lines.columns else "stock_customer"
+    mat_summary_ui = (
+        lines.groupby(material_key_ui, dropna=False)
+        .agg(total_qty=("qty", "sum"), total_sqm=("total_sqm", "sum"), total_cost=("line_total", "sum"))
+        .reset_index()
+        .rename(columns={material_key_ui: "material"})
+    )
+    st.dataframe(mat_summary_ui, use_container_width=True, hide_index=True)
 
 def export_preserving_excel_all_sheets() -> bytes:
     """
@@ -969,7 +980,7 @@ def export_preserving_excel_all_sheets() -> bytes:
         if write_zero_missing and missing_count > 0:
             df.loc[missing_map, "sqm_rate"] = 0.0
         df["ds_factor"] = np.where(df["sides"].astype(str) == "DS", 1.0 + ds_local, 1.0)
-        df["sqm_markup_factor"] = df["total_sqm"].apply(lambda x: sqm_markup_factor(x, sqm_markup_0_1_local, sqm_markup_1_3_local, sqm_markup_3_5_local))
+        df["sqm_markup_factor"] = df["sqm_each"].apply(lambda x: sqm_markup_factor(x, sqm_markup_0_1_local, sqm_markup_1_3_local, sqm_markup_3_5_local))
         df["line_total"] = (
             pd.to_numeric(df["total_sqm"], errors="coerce")
             * pd.to_numeric(df["sqm_rate"], errors="coerce")
@@ -1088,6 +1099,33 @@ def export_preserving_excel_all_sheets() -> bytes:
         for rr, d in enumerate(diag_rows, start=start_r+2):
             for c_i, h in enumerate(headers, start=1):
                 ws_sum.cell(row=rr, column=c_i, value=d.get(h))
+
+    # Material cost summary inside Quote Summary
+    if len(all_df):
+        material_df = all_df.copy()
+        material_key = "stock_std" if "stock_std" in material_df.columns else ("stock_customer" if "stock_customer" in material_df.columns else None)
+        if material_key is not None:
+            mat_summary = (
+                material_df.groupby(material_key, dropna=False)
+                .agg(
+                    total_qty=("qty", "sum"),
+                    total_sqm=("total_sqm", "sum"),
+                    total_cost=("line_total", "sum"),
+                )
+                .reset_index()
+                .rename(columns={material_key: "material"})
+            )
+            start_r2 = ws_sum.max_row + 3
+            ws_sum.cell(row=start_r2, column=1, value="Material Cost Summary")
+            headers2 = ["material", "total_qty", "total_sqm", "total_cost"]
+            for c_i, h in enumerate(headers2, start=1):
+                ws_sum.cell(row=start_r2 + 1, column=c_i, value=h)
+            for r_i, row in enumerate(mat_summary.itertuples(index=False), start=start_r2 + 2):
+                ws_sum.cell(row=r_i, column=1, value=row.material)
+                ws_sum.cell(row=r_i, column=2, value=float(row.total_qty) if pd.notna(row.total_qty) else 0.0)
+                ws_sum.cell(row=r_i, column=3, value=float(row.total_sqm) if pd.notna(row.total_sqm) else 0.0)
+                cost_cell = ws_sum.cell(row=r_i, column=4, value=float(row.total_cost) if pd.notna(row.total_cost) else 0.0)
+                cost_cell.number_format = "$#,##0.00"
 
     ws_li = wb.create_sheet("Line Items")
     if len(all_df):
