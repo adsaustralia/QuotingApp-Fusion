@@ -8,7 +8,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_VERSION = "row-based-v25-material-cost-summary"
+APP_VERSION = "row-based-v26-final-total-sqm-factor"
 
 APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
@@ -731,7 +731,7 @@ lines["sqm_rate"] = lines["stock_std"].map(std_rate_map)
 
 # DS loading factor
 lines["ds_factor"] = np.where(lines["sides"].astype(str) == "DS", 1.0 + ds_loading_pct, 1.0)
-lines["sqm_markup_factor"] = lines["sqm_each"].apply(lambda x: sqm_markup_factor(x, sqm_markup_0_1, sqm_markup_1_3, sqm_markup_3_5))
+lines["sqm_markup_factor"] = lines["total_sqm"].apply(lambda x: sqm_markup_factor(x, sqm_markup_0_1, sqm_markup_1_3, sqm_markup_3_5))
 
 lines["line_total"] = (
     pd.to_numeric(lines["total_sqm"], errors="coerce")
@@ -980,7 +980,7 @@ def export_preserving_excel_all_sheets() -> bytes:
         if write_zero_missing and missing_count > 0:
             df.loc[missing_map, "sqm_rate"] = 0.0
         df["ds_factor"] = np.where(df["sides"].astype(str) == "DS", 1.0 + ds_local, 1.0)
-        df["sqm_markup_factor"] = df["sqm_each"].apply(lambda x: sqm_markup_factor(x, sqm_markup_0_1_local, sqm_markup_1_3_local, sqm_markup_3_5_local))
+        df["sqm_markup_factor"] = df["total_sqm"].apply(lambda x: sqm_markup_factor(x, sqm_markup_0_1_local, sqm_markup_1_3_local, sqm_markup_3_5_local))
         df["line_total"] = (
             pd.to_numeric(df["total_sqm"], errors="coerce")
             * pd.to_numeric(df["sqm_rate"], errors="coerce")

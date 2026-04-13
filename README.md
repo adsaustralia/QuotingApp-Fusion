@@ -18,3 +18,6 @@ Double-sided loading is now loaded from `data/ds_rules.json` and hidden from the
 
 
 Adds a Material Cost Summary to the on-screen totals and the exported Quote Summary sheet.
+
+
+V26 final: SQM markup factor is applied using `total_sqm` in both UI calculations and Excel export recalculation.
